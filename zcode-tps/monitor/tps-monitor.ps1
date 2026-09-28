@@ -647,6 +647,7 @@ function Write-Status {
       target              = $script:Stats.target
       source              = $script:Stats.source
       zcodeWin            = $script:ZCodeState
+      pluginRoot          = $script:PluginRoot
       desiredSession      = $script:DesiredSession
       intentAtUtc         = $intentAt
       intentAgeMs         = $intentAgeMs
