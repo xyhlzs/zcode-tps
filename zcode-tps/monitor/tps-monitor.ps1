@@ -38,7 +38,7 @@
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File tps-monitor.ps1
     powershell.exe ... -File tps-monitor.ps1 -Headless -Seconds 10   # 无窗自检，写 status.json
     powershell.exe ... -File tps-monitor.ps1 -SessionId sess_xxx     # 手动钉死某个会话
-    powershell.exe ... -File tps-monitor.ps1 -Opacity 0.8   # 窗口不透明度（0.3-1.0，默认 0.8）
+    powershell.exe ... -File tps-monitor.ps1 -Opacity 0.85   # 窗口不透明度（0.3-1.0，默认 0.85）
 
   -LogDir / -RolloutDir / -StateDir / -IntentTtlMs 是给受控测试用的隔离与调参开关，
   见 tests\follow-test.ps1；日常运行不要传。
@@ -51,7 +51,7 @@ param(
   [string]$StateDir,
   [switch]$Headless,
   [int]$Seconds = 0,
-  [double]$Opacity = 0.8,
+  [double]$Opacity = 0.85,
   # 用户意图的有效期（毫秒）。默认 10 分钟，与 ZCode 回收空闲会话运行时的
   # resident idle 超时（实测 600000ms）一致：这段时间内该会话仍「活着」，
   # 超过后用户多半已经离开，才允许回落到「谁在生成就显示谁」。
@@ -113,6 +113,7 @@ function New-Stats {
     waiting        = $false
     spark          = @()
     error          = ''
+    chartMax       = 0.0
   }
 }
 
@@ -124,6 +125,8 @@ $script:IntentAtUtc = [DateTime]::MinValue                     # 该意图的日
 $script:ZCodeHwnd = [IntPtr]::Zero                             # ZCode 主窗口句柄缓存
 $script:ZCodeSeen = $false                                     # 是否成功找到过 ZCode 窗口
 $script:ZCodeState = 'none'                                    # none / normal / minimized / closed
+$script:ReqStart = $null                                       # 在飞请求 { sid, utc }（L1 信号，见 DESIGN.md §6）
+$script:Hovered = $false                                       # 鼠标是否悬停在小窗上（控制 × 显隐）
 
 $script:Drag = $false
 $script:DragMoved = $false
@@ -182,6 +185,41 @@ function Update-DesiredSession {
       if (-not $line) { continue }
       $m = [regex]::Match($line, '"event"\s*:\s*"([^"]+)"')
       if (-not $m.Success) { continue }
+      # 在飞跟踪（L1，DESIGN.md §6）：started 与 completed 按 sessionId 配对，
+      # 给界面提供「正在生成 · 已 Xs」。completed 可能不带 sessionId，此时视为
+      # 当前跟踪请求的结束；子代理的请求不触发计时。started 时间取日志行自己的
+      # timestamp——刚启动回看历史日志时，不能把几十秒前的开始当成刚刚发生。
+      if ($m.Groups[1].Value -eq 'model.request.started') {
+        $ms = [regex]::Match($line, '"sessionId"\s*:\s*"(sess_[^"]+)"')
+        if (-not $ms.Success -or $ms.Groups[1].Value -notlike 'sess_subagent_*') {
+          $sid = ''
+          if ($ms.Success) { $sid = $ms.Groups[1].Value }
+          $at = [DateTime]::UtcNow
+          $mt = [regex]::Match($line, '"timestamp"\s*:\s*"([^"]+)"')
+          if ($mt.Success) {
+            try {
+              $at = [DateTimeOffset]::Parse(
+                $mt.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+            } catch { }
+          }
+          $script:ReqStart = @{ sid = $sid; utc = $at }
+        }
+        continue
+      }
+      if ($m.Groups[1].Value -eq 'model.request.completed') {
+        $ms = [regex]::Match($line, '"sessionId"\s*:\s*"(sess_[^"]+)"')
+        if (-not $ms.Success) {
+          $script:ReqStart = $null
+        }
+        else {
+          $sid = $ms.Groups[1].Value
+          if ($sid -notlike 'sess_subagent_*' -and
+            (-not $script:ReqStart -or $script:ReqStart.sid -eq $sid)) {
+            $script:ReqStart = $null
+          }
+        }
+        continue
+      }
       if ($IntentEvents -notcontains $m.Groups[1].Value) { continue }
       # 顶层 sessionId 在 context 之前，取第一个匹配
       $m = [regex]::Match($line, '"sessionId"\s*:\s*"(sess_[^"]+)"')
@@ -486,6 +524,8 @@ function Get-SessTps {
 }
 
 function Get-ShortSessionId {
+  # 会话短码：FR1-5 要求显示目标可核对。人能读懂的标题要等 DESIGN.md v2 的
+  # sidecar，在此之前 id 前 8 位是唯一可用的标识。
   $sid = $script:Stats.sessionId
   if (-not $sid) { return '' }
   $sid = $sid -replace '^sess_', ''
@@ -620,8 +660,8 @@ function Px {
   return [single]($v * $script:Scale)
 }
 
-$W = [int](Px 240)
-$H = [int](Px 190)
+$W = [int](Px 216)
+$H = [int](Px 140)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'ZCode TPS'
@@ -631,14 +671,14 @@ $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
 $form.ClientSize = New-Object System.Drawing.Size($W, $H)
 $form.TopMost = $true
 $form.ShowInTaskbar = $false
-$form.BackColor = [System.Drawing.Color]::FromArgb(249, 250, 251)
+$form.BackColor = [System.Drawing.Color]::FromArgb(26, 29, 34)   # surface #1A1D22（VISUAL.md 3.1）
 $form.Opacity = $Opacity
 
 $dbProp = $form.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic')
 if ($dbProp) { $dbProp.SetValue($form, $true) }
 
 # 圆角
-$rad = Px 8
+$rad = Px 6
 $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
 $gp.AddArc(0, 0, $rad, $rad, 180, 90)
 $gp.AddArc(($W - $rad), 0, $rad, $rad, 270, 90)
@@ -661,25 +701,41 @@ $px = [Math]::Max($vs.Left, [Math]::Min($px, $vs.Right - $W))
 $py = [Math]::Max($vs.Top, [Math]::Min($py, $vs.Bottom - $H))
 $form.Location = New-Object System.Drawing.Point($px, $py)
 
+# 主数字用等宽字体：数字每 400ms 刷新一次，比例字宽会让数字和后面的单位左右跳。
+# GDI+ 不支持 OpenType 的 tabular figures，等宽是拿到表格数字的唯一途径；
+# 优先 Cascadia Mono（Windows Terminal 自带），没有则回退 Consolas。
+$heroFamily = 'Consolas'
+$heroStyle = [System.Drawing.FontStyle]::Bold
+try {
+  $installed = [System.Drawing.FontFamily]::Families | ForEach-Object { $_.Name }
+  foreach ($cand in @('Cascadia Mono SemiBold', 'Cascadia Mono', 'Cascadia Code')) {
+    if ($installed -contains $cand) {
+      $heroFamily = $cand
+      # SemiBold 是独立家族名，再叠 Bold 会过重
+      if ($cand -like '*SemiBold') { $heroStyle = [System.Drawing.FontStyle]::Regular }
+      break
+    }
+  }
+} catch { }
+
 $script:Fonts = @{
-  label = New-Object System.Drawing.Font('Segoe UI', 8)
-  big   = New-Object System.Drawing.Font('Segoe UI', 26, [System.Drawing.FontStyle]::Bold)
-  unit  = New-Object System.Drawing.Font('Segoe UI', 9)
-  stat  = New-Object System.Drawing.Font('Segoe UI', 8)
+  hero = New-Object System.Drawing.Font($heroFamily, 30, $heroStyle)
+  unit = New-Object System.Drawing.Font('Segoe UI', 8.5)
+  stat = New-Object System.Drawing.Font('Segoe UI', 8)
 }
+# 色彩只编码状态：数字只有白/灰，彩色仅在表达状态时出现，同一时刻最多一种彩
+# 色在场（VISUAL.md 3.1）
 $script:Brushes = @{
-  text   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(17, 24, 39))
-  muted  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(107, 114, 128))
-  faint  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(156, 163, 175))
-  accent = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(0, 120, 212))
-  bar    = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(140, 0, 120, 212))
-  barDim = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(48, 0, 120, 212))
-  live   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(16, 185, 129))
-  idle   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(209, 213, 219))
+  ink     = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(242, 244, 247))   # 在飞主数字
+  sub     = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(154, 161, 171))   # 单位/元信息/空闲主数字
+  faint   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(92, 100, 112))    # 历史柱/次要元信息
+  live    = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(52, 211, 153))    # 在飞状态点 + 最新柱
+  estim   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(229, 181, 103))   # 预留：v2 估算速率的 ≈ 前缀
+  error   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(229, 72, 77))     # 错误状态点与错误文案
+  idleDot = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(74, 80, 88))      # 空闲状态点
 }
 $script:Pens = @{
-  border = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(229, 231, 235)), 1
-  track  = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(243, 244, 246)), 1
+  track = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(38, 43, 50)), 1
 }
 
 function Save-Pos {
@@ -791,6 +847,13 @@ function Update-ZCodeFollow {
   } catch { }
 }
 
+function Draw-Right {
+  # 右对齐画一行小字：$rightX 是右边缘
+  param($g, $text, $font, $brush, [single]$rightX, [single]$y)
+  $w = $g.MeasureString($text, $font).Width
+  $g.DrawString($text, $font, $brush, ($rightX - $w), $y)
+}
+
 $form.Add_Paint({
     param($sender, $e)
     $g = $e.Graphics
@@ -804,95 +867,133 @@ $form.Add_Paint({
       $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
     }
 
-    $g.DrawString('ZCode TPS', $script:Fonts.label, $script:Brushes.muted, (Px 12), (Px 9))
-
-    $live = $false
+    # ---- 状态判定 ----
+    # 在飞：日志里有 started 未配对 completed 的请求（L1）。rollout 的 lastAt 只在
+    # 请求结束时更新，长请求期间靠它判断「在不在跑」会在 2.5s 后误判为空闲。
+    $inFlight = $false
+    $elapsedSec = 0.0
+    if ($script:ReqStart) {
+      $elapsedSec = ([DateTime]::UtcNow - $script:ReqStart.utc).TotalSeconds
+      if ($elapsedSec -gt 600) {
+        # 兜底：completed 事件丢了（回看窗口截断/日志轮转）时不能永远转下去
+        $script:ReqStart = $null
+      }
+      elseif (-not $script:ReqStart.sid -or -not $script:Stats.sessionId -or
+        $script:ReqStart.sid -eq $script:Stats.sessionId) {
+        $inFlight = $true
+      }
+    }
+    $recent = $false
     if ($script:Stats.lastAtUtc) {
-      $live = (([DateTime]::UtcNow - $script:Stats.lastAtUtc).TotalSeconds -lt 2.5)
+      $recent = (([DateTime]::UtcNow - $script:Stats.lastAtUtc).TotalSeconds -lt 2.5)
     }
-    $dotY = Px 13
-    $dotS = Px 7
-    if ($live) { $g.FillEllipse($script:Brushes.live, (Px 78), $dotY, $dotS, $dotS) }
-    else { $g.FillEllipse($script:Brushes.idle, (Px 78), $dotY, $dotS, $dotS) }
+    $live = $inFlight -or $recent
+    $hasError = [bool]$script:Stats.error
+    $hasData = ($null -ne $script:Stats.lastTps)
 
-    # 会话短码：确认当前数字属于哪个会话
-    $short = Get-ShortSessionId
-    if ($short) {
-      $sidText = "id $short"
-      $sidW = $g.MeasureString($sidText, $script:Fonts.stat).Width
-      $g.DrawString($sidText, $script:Fonts.stat, $script:Brushes.faint, ($W - $sidW - (Px 30)), (Px 9))
-    }
+    # ---- 状态点 ----
+    $dotBrush = $script:Brushes.idleDot
+    if ($hasError) { $dotBrush = $script:Brushes.error }
+    elseif ($live) { $dotBrush = $script:Brushes.live }
+    $g.FillEllipse($dotBrush, (Px 12), (Px 15), (Px 7), (Px 7))
 
-    $g.DrawString('×', $script:Fonts.unit, $script:Brushes.faint, ($W - (Px 22)), (Px 8))
-
+    # ---- 主数字 + 单位 ----
+    $numBrush = $script:Brushes.sub
+    if ($live -and -not $hasError) { $numBrush = $script:Brushes.ink }
     $txt = '—'
-    if ($null -ne $script:Stats.lastTps) { $txt = '{0:N1}' -f $script:Stats.lastTps }
-    $g.DrawString($txt, $script:Fonts.big, $script:Brushes.accent, (Px 10), (Px 24))
-    $w = $g.MeasureString($txt, $script:Fonts.big).Width
-    $g.DrawString('tok/s', $script:Fonts.unit, $script:Brushes.muted, ((Px 10) + $w + (Px 4)), (Px 46))
+    if ($hasData -and -not $hasError) { $txt = '{0:N1}' -f $script:Stats.lastTps }
+    $numX = Px 26; $numY = Px 0
+    $g.DrawString($txt, $script:Fonts.hero, $numBrush, $numX, $numY)
+    $numSize = $g.MeasureString($txt, $script:Fonts.hero)
+    $unitY = $numY + $numSize.Height - (Px 16)
+    $g.DrawString('tok/s', $script:Fonts.unit, $script:Brushes.sub, ($numX + $numSize.Width + (Px 2)), $unitY)
 
-    # 迷你柱状图
+    # ---- 右上角：生成中是 L1 计时；空闲/等待时让给会话短码（FR1-5 归属可核对） ----
+    if ($inFlight) {
+      Draw-Right -g $g -text ('{0:N1}s' -f $elapsedSec) -font $script:Fonts.unit `
+        -brush $script:Brushes.sub -rightX ($W - (Px 12)) -y (Px 16)
+    }
+    else {
+      $short = Get-ShortSessionId
+      if ($short) {
+        Draw-Right -g $g -text ('id {0}' -f $short) -font $script:Fonts.stat `
+          -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y (Px 17)
+      }
+    }
+    if ($script:Hovered) {
+      $g.DrawString('×', $script:Fonts.unit, $script:Brushes.sub, ($W - (Px 20)), (Px 0))
+    }
+
+    # ---- 迷你柱状图。纵轴迟滞：新高立即采用，之后每帧只许缓慢衰减，
+    #      否则每次刷出新高整图瞬间重缩放，看起来在「呼吸」 ----
     $spark = @($script:Stats.spark)
-    $x0 = Px 12; $y0 = Px 82; $bw = Px 216; $bh = Px 22
+    $x0 = Px 12; $y0 = Px 60; $bw = Px 192; $bh = Px 26
     $g.DrawLine($script:Pens.track, $x0, ($y0 + $bh), ($x0 + $bw), ($y0 + $bh))
     if ($spark.Count -gt 0) {
-      $max = ($spark | Measure-Object -Maximum).Maximum
-      if ($max -le 0) { $max = 1 }
+      $dataMax = ($spark | Measure-Object -Maximum).Maximum
+      if ($dataMax -le 0) { $dataMax = 1.0 }
+      if ($dataMax -gt $script:Stats.chartMax) { $script:Stats.chartMax = [double]$dataMax }
+      else { $script:Stats.chartMax = [Math]::Max($dataMax, $script:Stats.chartMax * 0.997) }
       $slots = 40.0
       $step = $bw / $slots
       $n = $spark.Count
       for ($i = 0; $i -lt $n; $i++) {
         $v = [double]$spark[$i]
-        $h = [Math]::Max([double](Px 2), ($v / $max) * $bh)
+        $h = [Math]::Max([double](Px 2), ($v / $script:Stats.chartMax) * $bh)
         $x = $x0 + ($i * $step)
-        $barW = [single][Math]::Max([double](Px 2), $step - (Px 1.5))
-        if ($i -eq $n - 1) {
-          $g.FillRectangle($script:Brushes.bar, [single]$x, [single]($y0 + $bh - $h), $barW, [single]$h)
+        $barW = [single][Math]::Max([double](Px 2), $step - (Px 1))
+        if (($i -eq $n - 1) -and $live) {
+          $g.FillRectangle($script:Brushes.live, [single]$x, [single]($y0 + $bh - $h), $barW, [single]$h)
         }
         else {
-          $g.FillRectangle($script:Brushes.barDim, [single]$x, [single]($y0 + $bh - $h), $barW, [single]$h)
+          $g.FillRectangle($script:Brushes.faint, [single]$x, [single]($y0 + $bh - $h), $barW, [single]$h)
         }
       }
     }
 
-    $turnTps = Get-TurnTps
-    $sessTps = Get-SessTps
-    $maxTps = $script:Stats.sessMaxTps
-    $turnText = '—'
-    if ($null -ne $turnTps) { $turnText = '{0:N1}' -f $turnTps }
-    $sessText = '—'
-    if ($null -ne $sessTps) { $sessText = '{0:N1}' -f $sessTps }
-    $maxText = '—'
-    if ($null -ne $maxTps) { $maxText = '{0:N1}' -f $maxTps }
-
-    $g.DrawString(('本轮  {0} tok/s  {1:N0} tok' -f $turnText, $script:Stats.turnOut), $script:Fonts.stat, $script:Brushes.text, (Px 12), (Px 112))
-    # 会话合计口径（Σ tokens ÷ Σ time）即当前会话的平均速率
-    $g.DrawString(('平均  {0} tok/s  {1:N0} tok' -f $sessText, $script:Stats.sessOut), $script:Fonts.stat, $script:Brushes.muted, (Px 12), (Px 128))
-    $g.DrawString(('最高  {0} tok/s' -f $maxText), $script:Fonts.stat, $script:Brushes.muted, (Px 12), (Px 144))
-
-    $foot = ''
+    # ---- 元信息三行（等待/出错时换成状态文案）。
+    #      左列是对象与累计，右列是速率口径，全部同字号——层级靠主数字的
+    #      体量与颜色对比表达，不靠删信息（FR1-5/6/7 的数据全保留） ----
+    $metaY1 = Px 92; $metaY2 = Px 107; $metaY3 = Px 122
     if ($script:Stats.waiting) {
-      $foot = '该会话暂无生成数据'
+      $g.DrawString('该会话暂无生成数据', $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
     }
-    elseif ($script:Stats.error) {
-      $foot = $script:Stats.error
+    elseif ($hasError) {
+      $g.DrawString($script:Stats.error, $script:Fonts.stat, $script:Brushes.error, (Px 12), $metaY1)
     }
     elseif ($script:Stats.requests -eq 0 -and $script:Stats.skipped -gt 0) {
-      $foot = '已读 {0} 行，0 条可识别' -f $script:Stats.skipped
+      $g.DrawString(('已读 {0} 行，0 条可识别' -f $script:Stats.skipped), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
     }
     else {
       $model = $script:Stats.model
       if (-not $model) { $model = '等待输出' }
-      $ago = ''
-      if ($script:Stats.lastAtUtc) {
-        $s = [int]([DateTime]::UtcNow - $script:Stats.lastAtUtc).TotalSeconds
-        $ago = "  ${s}s 前"
+      $reqText = 'req {0}' -f $script:Stats.requests
+      $reqW = $g.MeasureString($reqText, $script:Fonts.stat).Width
+      $avail = ($W - (Px 12) - $reqW - (Px 10)) - (Px 12)
+      while ($model.Length -gt 1 -and $g.MeasureString($model, $script:Fonts.stat).Width -gt $avail) {
+        $model = $model.Substring(0, $model.Length - 1)
       }
-      $foot = '{0}  {1} req{2}' -f $model, $script:Stats.requests, $ago
-    }
-    $g.DrawString($foot, $script:Fonts.stat, $script:Brushes.faint, (Px 12), (Px 160))
+      if ($script:Stats.model -and $model -ne $script:Stats.model) { $model += '…' }
+      $g.DrawString($model, $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
+      Draw-Right -g $g -text $reqText -font $script:Fonts.stat `
+        -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y $metaY1
 
-    $g.DrawRectangle($script:Pens.border, 0, 0, ($W - 1), ($H - 1))
+      $turnText = '—'
+      if ($script:Stats.turnOut -gt 0) { $turnText = '{0:N0}' -f $script:Stats.turnOut }
+      $avgText = '—'
+      $avgTps = Get-SessTps
+      if ($null -ne $avgTps) { $avgText = '{0:N1}' -f $avgTps }
+      $maxText = '—'
+      if ($null -ne $script:Stats.sessMaxTps) { $maxText = '{0:N1}' -f $script:Stats.sessMaxTps }
+      $g.DrawString(('本轮 {0} tok' -f $turnText), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY2)
+      # 会话合计口径（Σ tokens ÷ Σ time）即当前会话的平均速率
+      Draw-Right -g $g -text ('平均 {0}' -f $avgText) -font $script:Fonts.stat `
+        -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y $metaY2
+
+      $g.DrawString(('累计 {0:N0} tok' -f $script:Stats.sessOut), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY3)
+      Draw-Right -g $g -text ('最高 {0}' -f $maxText) -font $script:Fonts.stat `
+        -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y $metaY3
+    }
   })
 
 $form.Add_MouseDown({
@@ -921,6 +1022,16 @@ $form.Add_MouseUp({
     $script:DragMoved = $false
     if ($wasDrag) { Save-Pos; return }
     if ($e.X -ge ($W - (Px 34)) -and $e.Y -le (Px 28)) { $form.Close() }
+  })
+
+# 关闭钮平时不画（chrome 为零），悬停时才出现；命中区不变
+$form.Add_MouseEnter({
+    $script:Hovered = $true
+    $form.Invalidate()
+  })
+$form.Add_MouseLeave({
+    $script:Hovered = $false
+    $form.Invalidate()
   })
 
 # 提前创建句柄并设 WS_EX_NOACTIVATE：小窗永不成为前台窗口，显示/点击/拖动都不抢

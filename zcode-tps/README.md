@@ -10,21 +10,22 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 
 ## 显示内容
 
+深色小窗（#1A1D22，视觉方案见 VISUAL.md），「数字即界面」：大号等宽数字是唯一的
+主角，其余信息以小号灰字收在下方，彩色只在表达状态时出现。
+
 | 位置 | 含义 |
 |---|---|
-| 大号数字 | 最近一次模型请求的速率 = `outputTokens ÷ durationMs` |
-| 迷你柱状图 | 最近 40 次请求的速率，最右一根是当前值 |
-| 右上 `id xxxxxxxx` | 当前显示的是哪个会话（会话 id 前 8 位） |
-| 左上圆点 | 绿色 = 2.5 秒内有新数据，灰色 = 空闲 |
-| 本轮 | 当前 turn 内所有请求的合计速率与总输出 token |
-| 平均 | 该会话（从回看窗口起）的平均速率 = Σ outputTokens ÷ Σ durationMs，与总输出 token |
-| 最高 | 该会话内单次请求的最高速率 |
-| 底部 | 模型名、已统计请求数、距上次更新的秒数；归属切到无数据会话时显示「该会话暂无生成数据」 |
+| 大号数字 | 最近一次模型请求的速率 = `outputTokens ÷ durationMs`；等宽字体，刷新时字宽稳定不抖。在飞时亮白，空闲时降为灰色 |
+| 左上圆点 | 绿色 = 正在生成（日志有 started 未配对 completed 的请求）或 2.5 秒内有新数据；红色 = 出错；灰色 = 空闲 |
+| 右上角 | 生成中显示本次请求已进行的秒数（计时来源是日志 `model.request.started`，≤1s 刷新）；空闲/等待时显示 `id xxxxxxxx`（当前会话 id 前 8 位） |
+| 迷你柱状图 | 最近 40 次请求的速率，历史柱灰色，最右一根是当前值（在飞时绿色）；纵轴带迟滞，刷出新高不会整图重缩放 |
+| 元信息三行 | 左列：模型名（超长截断）、本轮 turn 输出 token、会话累计输出 token；右列：已统计请求数、平均速率（Σ outputTokens ÷ Σ durationMs）、单次请求最高速率 |
+| 状态文案 | 归属切到无数据会话时显示「该会话暂无生成数据」；出错时显示红色错误信息 |
 
-窗口可拖动（拖完位置记在 `%LOCALAPPDATA%\ZCodeTpsMonitor\pos.txt`），
-点右上角 `×` 关闭。窗口默认 80% 不透明度（半透明），想更透或更实用
-`-Opacity` 在 0.3–1.0 间调整；半透明下文字改用灰度抗锯齿渲染——分层窗口
-没有不透明底色，ClearType 会按透明底混出彩边。
+窗口可拖动（拖完位置记在 `%LOCALAPPDATA%\ZCodeTpsMonitor\pos.txt`）。
+关闭钮平时不显示，鼠标悬停到小窗上时右上角淡入 `×`。窗口默认 85% 不透明度
+（半透明），想更透或更实用 `-Opacity` 在 0.3–1.0 间调整；半透明下文字改用
+灰度抗锯齿渲染——分层窗口没有不透明底色，ClearType 会按透明底混出彩边。
 
 小窗跟随 ZCode 主窗口：ZCode 最小化时一并收起、恢复时弹回原位；ZCode
 切到后台（不在前台）时小窗隐藏、回到前台自动恢复显示；ZCode 关闭时小窗
@@ -123,7 +124,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 # 手动钉死某个会话排查
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 -SessionId sess_xxxx
 
-# 调整窗口不透明度（0.3-1.0，默认 0.8）
+# 调整窗口不透明度（0.3-1.0，默认 0.85）
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 -Opacity 0.7
 ```
 
