@@ -73,13 +73,43 @@ try {
   $script:Restricted = $true
 }
 
-$ZCodeHome = Join-Path $env:USERPROFILE '.zcode\cli'
-if (-not $RolloutDir) { $RolloutDir = Join-Path $ZCodeHome 'rollout' }
-if (-not $LogDir) { $LogDir = Join-Path $ZCodeHome 'log' }
-
+# ------------------------------------------------------------------ 配置文件
+# 可选 config.json：普通用户改这里，不用碰 hook 命令行（PORTABILITY.md §2 L2）。
+# 优先级：命令行显式参数 > 配置文件 > 内置默认。解析失败按无配置处理。
 if (-not $StateDir) { $StateDir = Join-Path $env:LOCALAPPDATA 'ZCodeTpsMonitor' }
 $PosFile = Join-Path $StateDir 'pos.txt'
 $StatusFile = Join-Path $StateDir 'status.json'
+$ConfigFile = Join-Path $StateDir 'config.json'
+
+$script:Cfg = @{
+  language         = 'auto'      # auto | zh-CN | en-US
+  opacity          = $null       # $null = 未配置，用内置默认
+  zcodeHome        = ''          # 空 = %USERPROFILE%\.zcode\cli
+  windowTitle      = 'ZCode'     # ZCode 主窗口匹配：标题
+  windowProcess    = 'ZCode'     # ZCode 主窗口匹配：进程名
+  followForeground = $true       # false = ZCode 不在前台也不隐藏小窗
+}
+try {
+  if (Test-Path -LiteralPath $ConfigFile) {
+    $raw = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($raw.language) { $script:Cfg.language = [string]$raw.language }
+    if ($null -ne $raw.opacity) { $script:Cfg.opacity = [double]$raw.opacity }
+    if ($raw.zcodeHome) { $script:Cfg.zcodeHome = [string]$raw.zcodeHome }
+    if ($raw.windowTitle) { $script:Cfg.windowTitle = [string]$raw.windowTitle }
+    if ($raw.windowProcess) { $script:Cfg.windowProcess = [string]$raw.windowProcess }
+    if ($null -ne $raw.followForeground) { $script:Cfg.followForeground = [bool]$raw.followForeground }
+  }
+} catch { }
+
+# 命令行显式传参优先于配置文件；配置值同样要钳制
+if (-not $PSBoundParameters.ContainsKey('Opacity') -and $null -ne $script:Cfg.opacity) {
+  $Opacity = [Math]::Min(1.0, [Math]::Max(0.3, $script:Cfg.opacity))
+}
+
+$ZCodeHome = Join-Path $env:USERPROFILE '.zcode\cli'
+if ($script:Cfg.zcodeHome) { $ZCodeHome = $script:Cfg.zcodeHome }
+if (-not $RolloutDir) { $RolloutDir = Join-Path $ZCodeHome 'rollout' }
+if (-not $LogDir) { $LogDir = Join-Path $ZCodeHome 'log' }
 
 # 首次接入一个 rollout 文件时回看多少字节（行对齐后从这里开始读）
 $LookbackBytes = 8388608L
@@ -786,11 +816,11 @@ function Find-ZCodeWindow {
       param($h, $l)
       $sb = New-Object System.Text.StringBuilder 64
       [void][ZCodeNative.Dpi]::GetWindowText($h, $sb, 64)
-      if ($sb.ToString() -ne 'ZCode') { return $true }      # 标题先过滤，命中才查进程（贵）
+      if ($sb.ToString() -ne $script:Cfg.windowTitle) { return $true }  # 标题先过滤，命中才查进程（贵）
       [uint32]$p = 0
       [void][ZCodeNative.Dpi]::GetWindowThreadProcessId($h, [ref]$p)
       $proc = Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue
-      if ($proc -and $proc.ProcessName -eq 'ZCode' -and [ZCodeNative.Dpi]::IsWindowVisible($h)) {
+      if ($proc -and $proc.ProcessName -eq $script:Cfg.windowProcess -and [ZCodeNative.Dpi]::IsWindowVisible($h)) {
         $script:ZCodeFound = $h
         return $false                                       # 找到即停
       }
@@ -843,14 +873,14 @@ function Update-ZCodeFollow {
       [uint32]$fp = 0
       [void][ZCodeNative.Dpi]::GetWindowThreadProcessId($fg, [ref]$fp)
       $fgProc = Get-Process -Id ([int]$fp) -ErrorAction SilentlyContinue
-      if ($fgProc -and $fgProc.ProcessName -eq 'ZCode') { $isFg = $true }
+      if ($fgProc -and $fgProc.ProcessName -eq $script:Cfg.windowProcess) { $isFg = $true }
     }
     if ($isFg) {
       $script:ZCodeState = 'normal'
       if (-not $form.Visible) { $form.Show() }
     }
-    elseif (-not $script:Drag) {
-      # ZCode 不在前台：隐藏小窗。拖动进行中暂缓一轮，拖完再隐藏。
+    elseif ($script:Cfg.followForeground -and -not $script:Drag) {
+      # ZCode 不在前台：隐藏小窗（config.followForeground 可关）。拖动进行中暂缓一轮。
       $script:ZCodeState = 'hidden'
       if ($form.Visible) { $form.Hide() }
     }
