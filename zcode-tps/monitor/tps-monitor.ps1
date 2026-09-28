@@ -55,7 +55,10 @@ param(
   # 用户意图的有效期（毫秒）。默认 10 分钟，与 ZCode 回收空闲会话运行时的
   # resident idle 超时（实测 600000ms）一致：这段时间内该会话仍「活着」，
   # 超过后用户多半已经离开，才允许回落到「谁在生成就显示谁」。
-  [int]$IntentTtlMs = 600000
+  [int]$IntentTtlMs = 600000,
+  # 跳过卸载毒丸（PORTABILITY.md §2 L4-1）。给受控测试用：测试副本放在临时目录
+  # 时目录被清会误杀监控。日常运行不要传。
+  [switch]$NoWatchdog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,6 +83,13 @@ if (-not $StateDir) { $StateDir = Join-Path $env:LOCALAPPDATA 'ZCodeTpsMonitor' 
 $PosFile = Join-Path $StateDir 'pos.txt'
 $StatusFile = Join-Path $StateDir 'status.json'
 $ConfigFile = Join-Path $StateDir 'config.json'
+$StopFlag = Join-Path $StateDir 'stop.flag'
+
+# 卸载毒丸的判定基准：脚本住在 <插件根>\monitor\ 下，上级就是插件根
+# （PORTABILITY.md §2 L4-1）。插件被卸载/缓存被清时该目录消失。
+$script:PluginRoot = $null
+try { $script:PluginRoot = Split-Path -Parent $PSScriptRoot } catch { }
+$script:TearDown = $false            # 毒丸清理后关闭窗口时不再回写 pos.txt
 
 $script:Cfg = @{
   language         = 'auto'      # auto | zh-CN | en-US
@@ -827,6 +837,8 @@ $script:Pens = @{
 
 function Save-Pos {
   try {
+    # 毒丸清理后不再回写：卸载要的是状态文件消失，不是换个位置重建
+    if ($script:TearDown) { return }
     if (-not (Test-Path -LiteralPath $StateDir)) {
       [void](New-Item -ItemType Directory -Path $StateDir -Force)
     }
@@ -1142,6 +1154,22 @@ $script:TickCount = 0
 $timer.Add_Tick({
     if ($form.IsDisposed) { return }
     $script:TickCount++
+    # —— 生命周期看门狗（PORTABILITY.md §2 L4）——
+    # /tps stop 的哨兵文件：删掉它并退出。文件是最低公分母的 IPC。
+    if (Test-Path -LiteralPath $StopFlag -PathType Leaf) {
+      Remove-Item -LiteralPath $StopFlag -Force -ErrorAction SilentlyContinue
+      $form.Close()
+      return
+    }
+    # 插件被卸载/缓存被清（脚本所在插件根目录消失）：退出并清掉状态文件，不留残留。
+    # 每 5 个 tick（2s）查一次目录存在性，代价可忽略。
+    if (-not $NoWatchdog -and ($script:TickCount % 5) -eq 0 -and $script:PluginRoot -and
+      -not (Test-Path -LiteralPath $script:PluginRoot)) {
+      $script:TearDown = $true
+      Remove-Item -LiteralPath $PosFile, $StatusFile, $ConfigFile -Force -ErrorAction SilentlyContinue
+      $form.Close()
+      return
+    }
     Update-ZCodeFollow
     if ($form.IsDisposed) { return }   # 本轮跟随把窗口关了
     if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized -or -not $form.Visible) {
