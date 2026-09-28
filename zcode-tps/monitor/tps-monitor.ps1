@@ -111,6 +111,53 @@ if ($script:Cfg.zcodeHome) { $ZCodeHome = $script:Cfg.zcodeHome }
 if (-not $RolloutDir) { $RolloutDir = Join-Path $ZCodeHome 'rollout' }
 if (-not $LogDir) { $LogDir = Join-Path $ZCodeHome 'log' }
 
+# ------------------------------------------------------------------ 界面文案 i18n
+# 字符串表（PORTABILITY.md §2 L3）：config.language → 系统 UI 文化 → 英文兜底。
+# 只做 zh/en 两份，其余 locale 落英文；就是脚本内两个 hashtable，不引资源文件。
+$script:StrTables = @{
+  zh = @{
+    unit       = 'tok/s'
+    noRollout  = '未找到 rollout 文件'
+    waiting    = '该会话暂无生成数据'
+    unreadable = '已读 {0} 行，0 条可识别'
+    restricted = '精简模式（系统策略限制）'
+    reqFmt     = 'req {0}'
+    turnFmt    = '本轮 {0} tok'
+    totalFmt   = '累计 {0:N0} tok'
+    avgFmt     = '平均 {0}'
+    maxFmt     = '最高 {0}'
+    idFmt      = 'id {0}'
+    noModel    = '等待输出'
+  }
+  en = @{
+    unit       = 'tok/s'
+    noRollout  = 'Rollout files not found'
+    waiting    = 'No generation data in this session yet'
+    unreadable = 'Read {0} lines, 0 recognized'
+    restricted = 'Lite mode (system policy)'
+    reqFmt     = 'req {0}'
+    turnFmt    = 'Turn {0} tok'
+    totalFmt   = 'Total {0:N0} tok'
+    avgFmt     = 'Avg {0}'
+    maxFmt     = 'Peak {0}'
+    idFmt      = 'id {0}'
+    noModel    = 'Waiting for output'
+  }
+}
+$script:Lang = 'en'
+try {
+  $want = $script:Cfg.language
+  if ($want -eq 'auto') {
+    # auto：系统 UI 语言以 zh 开头（zh-CN/zh-TW…）给中文，否则英文
+    $want = 'en'
+    if ((Get-UICulture).Name -like 'zh*') { $want = 'zh' }
+  }
+  elseif ($want -like 'zh*') { $want = 'zh' }
+  else { $want = 'en' }
+  $script:Lang = $want
+} catch { }
+$script:Str = $script:StrTables[$script:Lang]
+
 # 首次接入一个 rollout 文件时回看多少字节（行对齐后从这里开始读）
 $LookbackBytes = 8388608L
 
@@ -538,7 +585,7 @@ function Update-Stats {
         $script:Stats.waiting = $true
         return
       }
-      $script:Stats.error = '未找到 rollout 文件'
+      $script:Stats.error = $script:Str.noRollout
       return
     }
     $script:Stats.error = ''
@@ -946,8 +993,7 @@ $form.Add_Paint({
     $g.DrawString($txt, $script:Fonts.hero, $numBrush, $numX, $numY)
     $numSize = $g.MeasureString($txt, $script:Fonts.hero)
     $unitY = $numY + $numSize.Height - (Px 16)
-    $g.DrawString('tok/s', $script:Fonts.unit, $script:Brushes.sub, ($numX + $numSize.Width + (Px 2)), $unitY)
-
+    $g.DrawString($script:Str.unit, $script:Fonts.unit, $script:Brushes.sub, ($numX + $numSize.Width + (Px 2)), $unitY)
     # ---- 右上角：生成中是 L1 计时；空闲/等待时让给会话短码（FR1-5 归属可核对） ----
     if ($inFlight) {
       Draw-Right -g $g -text ('{0:N1}s' -f $elapsedSec) -font $script:Fonts.unit `
@@ -956,7 +1002,7 @@ $form.Add_Paint({
     else {
       $short = Get-ShortSessionId
       if ($short) {
-        Draw-Right -g $g -text ('id {0}' -f $short) -font $script:Fonts.stat `
+        Draw-Right -g $g -text ($script:Str.idFmt -f $short) -font $script:Fonts.stat `
           -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y (Px 17)
       }
     }
@@ -996,21 +1042,21 @@ $form.Add_Paint({
     #      体量与颜色对比表达，不靠删信息（FR1-5/6/7 的数据全保留） ----
     $metaY1 = Px 92; $metaY2 = Px 107; $metaY3 = Px 122
     if ($script:Stats.waiting) {
-      $g.DrawString('该会话暂无生成数据', $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
+      $g.DrawString($script:Str.waiting, $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
     }
     elseif ($hasError) {
       $g.DrawString($script:Stats.error, $script:Fonts.stat, $script:Brushes.error, (Px 12), $metaY1)
     }
     elseif ($script:Stats.requests -eq 0 -and $script:Stats.skipped -gt 0) {
-      $g.DrawString(('已读 {0} 行，0 条可识别' -f $script:Stats.skipped), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
+      $g.DrawString(($script:Str.unreadable -f $script:Stats.skipped), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
     }
     else {
       $model = $script:Stats.model
-      if (-not $model) { $model = '等待输出' }
+      if (-not $model) { $model = $script:Str.noModel }
       # 受限语言模式下窗口跟随/置顶会静默失效（PORTABILITY.md §2 L1），
       # 借这个位置如实标注；req 计数退到 status.json 可查
-      $reqText = '精简模式（系统策略限制）'
-      if (-not $script:Restricted) { $reqText = 'req {0}' -f $script:Stats.requests }
+      $reqText = $script:Str.restricted
+      if (-not $script:Restricted) { $reqText = $script:Str.reqFmt -f $script:Stats.requests }
       $reqW = $g.MeasureString($reqText, $script:Fonts.stat).Width
       $avail = ($W - (Px 12) - $reqW - (Px 10)) - (Px 12)
       while ($model.Length -gt 1 -and $g.MeasureString($model, $script:Fonts.stat).Width -gt $avail) {
@@ -1028,13 +1074,13 @@ $form.Add_Paint({
       if ($null -ne $avgTps) { $avgText = '{0:N1}' -f $avgTps }
       $maxText = '—'
       if ($null -ne $script:Stats.sessMaxTps) { $maxText = '{0:N1}' -f $script:Stats.sessMaxTps }
-      $g.DrawString(('本轮 {0} tok' -f $turnText), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY2)
+      $g.DrawString(($script:Str.turnFmt -f $turnText), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY2)
       # 会话合计口径（Σ tokens ÷ Σ time）即当前会话的平均速率
-      Draw-Right -g $g -text ('平均 {0}' -f $avgText) -font $script:Fonts.stat `
+      Draw-Right -g $g -text ($script:Str.avgFmt -f $avgText) -font $script:Fonts.stat `
         -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y $metaY2
 
-      $g.DrawString(('累计 {0:N0} tok' -f $script:Stats.sessOut), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY3)
-      Draw-Right -g $g -text ('最高 {0}' -f $maxText) -font $script:Fonts.stat `
+      $g.DrawString(($script:Str.totalFmt -f $script:Stats.sessOut), $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY3)
+      Draw-Right -g $g -text ($script:Str.maxFmt -f $maxText) -font $script:Fonts.stat `
         -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y $metaY3
     }
   })
