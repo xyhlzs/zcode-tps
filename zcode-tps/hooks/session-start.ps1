@@ -13,6 +13,10 @@
 #>
 $ErrorActionPreference = 'SilentlyContinue'
 
+# 非 Windows 静默退出：监控是 WinForms + user32 实现，跨平台明确不支持
+# （PORTABILITY.md §1.1）。hook 报错会打扰每个会话启动，所以必须无声。
+if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) { exit 0 }
+
 $root = $env:CLAUDE_PLUGIN_ROOT
 if (-not $root) { $root = Split-Path -Parent $PSScriptRoot }
 $monitor = Join-Path $root 'monitor\tps-monitor.ps1'

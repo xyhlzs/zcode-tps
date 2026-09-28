@@ -63,6 +63,16 @@ $ErrorActionPreference = 'Stop'
 # 钳制到可用区间：低于 0.3 基本看不清，高于 1.0 非法
 $Opacity = [Math]::Min(1.0, [Math]::Max(0.3, $Opacity))
 
+# 受限语言模式探测（PORTABILITY.md §2 L1）：企业策略下 Add-Type 编译被禁，
+# 窗口跟随/置顶自愈/不抢焦点都会静默失效。把「静默退化」变成「可见的退化」：
+# 界面上标注精简模式。读取本身在 CLM 下允许；连读取都失败时按受限处理。
+$script:Restricted = $false
+try {
+  if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $script:Restricted = $true }
+} catch {
+  $script:Restricted = $true
+}
+
 $ZCodeHome = Join-Path $env:USERPROFILE '.zcode\cli'
 if (-not $RolloutDir) { $RolloutDir = Join-Path $ZCodeHome 'rollout' }
 if (-not $LogDir) { $LogDir = Join-Path $ZCodeHome 'log' }
@@ -967,7 +977,10 @@ $form.Add_Paint({
     else {
       $model = $script:Stats.model
       if (-not $model) { $model = '等待输出' }
-      $reqText = 'req {0}' -f $script:Stats.requests
+      # 受限语言模式下窗口跟随/置顶会静默失效（PORTABILITY.md §2 L1），
+      # 借这个位置如实标注；req 计数退到 status.json 可查
+      $reqText = '精简模式（系统策略限制）'
+      if (-not $script:Restricted) { $reqText = 'req {0}' -f $script:Stats.requests }
       $reqW = $g.MeasureString($reqText, $script:Fonts.stat).Width
       $avail = ($W - (Px 12) - $reqW - (Px 10)) - (Px 12)
       while ($model.Length -gt 1 -and $g.MeasureString($model, $script:Fonts.stat).Width -gt $avail) {
