@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.ps1"
+            ],
+            "timeoutMs": 15000,
+            "statusMessage": "启动 TPS 监控"
+          }
+        ]
+      }
+    ]
+  }
+}
