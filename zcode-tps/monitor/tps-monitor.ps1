@@ -14,6 +14,16 @@
     而 rollout 要等这次生成结束才落盘（可能几十秒），所以光看 rollout
     的 mtime 会明显滞后；靠日志事件才能立刻跟住会话切换。
 
+    只有 turn.started / session.resumed 算「用户意图」，且带有效期
+    （IntentTtlMs，默认 10 分钟）。有效期内的意图不会被别的会话的 rollout
+    写入否决——这是必须的：并发时后台会话每完成一个请求就刷新自己的文件，
+    而用户所在会话在「思考」期间（一次请求没结束）根本不写文件，拿文件
+    新鲜度去比较，显示必然被后台会话抢走。
+    bootstrap.app.startup.started / session_create.completed 刻意不算意图：
+    它们对「用户新建会话」和「任务系统临时建会话」一视同仁（实测当天 44 次
+    创建里 24 次创建后没有任何对话活动），采纳它们会把显示目标劫持到一个
+    永远没有数据的会话上。
+
   == 为什么不用 ConvertFrom-Json ==
   单条 rollout 记录里 request.messages 带完整对话历史，长会话下单条可达数 MB，
   既超过 PS 5.1 的 MaxJsonLength(2MB) 上限，整体解析也浪费。
@@ -29,15 +39,23 @@
     powershell.exe ... -File tps-monitor.ps1 -Headless -Seconds 10   # 无窗自检，写 status.json
     powershell.exe ... -File tps-monitor.ps1 -SessionId sess_xxx     # 手动钉死某个会话
     powershell.exe ... -File tps-monitor.ps1 -Opacity 0.8   # 窗口不透明度（0.3-1.0，默认 0.8）
+
+  -LogDir / -RolloutDir / -StateDir / -IntentTtlMs 是给受控测试用的隔离与调参开关，
+  见 tests\follow-test.ps1；日常运行不要传。
 #>
 [CmdletBinding()]
 param(
   [string]$SessionId,
   [string]$RolloutDir,
   [string]$LogDir,
+  [string]$StateDir,
   [switch]$Headless,
   [int]$Seconds = 0,
-  [double]$Opacity = 0.8
+  [double]$Opacity = 0.8,
+  # 用户意图的有效期（毫秒）。默认 10 分钟，与 ZCode 回收空闲会话运行时的
+  # resident idle 超时（实测 600000ms）一致：这段时间内该会话仍「活着」，
+  # 超过后用户多半已经离开，才允许回落到「谁在生成就显示谁」。
+  [int]$IntentTtlMs = 600000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,26 +67,27 @@ $ZCodeHome = Join-Path $env:USERPROFILE '.zcode\cli'
 if (-not $RolloutDir) { $RolloutDir = Join-Path $ZCodeHome 'rollout' }
 if (-not $LogDir) { $LogDir = Join-Path $ZCodeHome 'log' }
 
-$StateDir = Join-Path $env:LOCALAPPDATA 'ZCodeTpsMonitor'
+if (-not $StateDir) { $StateDir = Join-Path $env:LOCALAPPDATA 'ZCodeTpsMonitor' }
 $PosFile = Join-Path $StateDir 'pos.txt'
 $StatusFile = Join-Path $StateDir 'status.json'
 
 # 首次接入一个 rollout 文件时回看多少字节（行对齐后从这里开始读）
 $LookbackBytes = 8388608L
 
-# 日志事件指定的会话，若落后最新活动超过这个毫秒数，就认为用户跑到别的会话去了
-$DesiredStaleMs = 30000
+# 首次接入日志文件时回看多少字节，用来找最近一次「用户意图」事件。
+# 稳态下每 400ms 增量读取就够了，但刚启动的守护进程只能靠回看：64KB 在繁忙
+# 日志里只覆盖几秒，可能错过最后一次 turn.started。回看里读到旧意图不会被
+# 误当成刚发生的意图——意图时间取日志行自己的 timestamp（见 Update-DesiredSession）。
+$LogAttachLookbackBytes = 1048576L
 
 # 回退到「最新活动文件」时，新文件要比当前目标新这么多才切，避免两个会话交替写入时来回跳
 $SwitchHysteresisMs = 2000
 
-# 这些日志事件代表「某个会话刚刚被激活 / 用户刚在这个会话里提交了输入」
-$ActivationEvents = @(
-  'turn.started',
-  'session.resumed',
-  'zcode_protocol.session_create.completed',
-  'bootstrap.app.startup.started'
-)
+# 这些日志事件代表「用户此刻在这个会话里」：
+#   turn.started    —— 用户在会话里提交了输入
+#   session.resumed —— 恢复「有历史」的会话（实测其 context.appliedMessageCount > 0），
+#                      任务系统临时建的会话不会触发
+$IntentEvents = @('turn.started', 'session.resumed')
 
 # ------------------------------------------------------------------ 状态
 
@@ -100,7 +119,8 @@ function New-Stats {
 $script:Stats = New-Stats
 $script:Tail = @{ path = ''; pos = 0L; carry = '' }          # rollout 读取游标
 $script:LogTail = @{ path = ''; pos = 0L; carry = '' }        # 日志读取游标
-$script:DesiredSession = ''                                    # 日志事件给出的目标会话
+$script:DesiredSession = ''                                    # 用户意图指向的会话（见 $IntentEvents）
+$script:IntentAtUtc = [DateTime]::MinValue                     # 该意图的日志时间戳，用来判是否过期
 $script:ZCodeHwnd = [IntPtr]::Zero                             # ZCode 主窗口句柄缓存
 $script:ZCodeSeen = $false                                     # 是否成功找到过 ZCode 窗口
 $script:ZCodeState = 'none'                                    # none / normal / minimized / closed
@@ -129,8 +149,8 @@ function Update-DesiredSession {
       $script:LogTail.path = $path
       $script:LogTail.carry = ''
       $len = (Get-Item -LiteralPath $path).Length
-      # 回看尾部即可：要的是「最近一次会话激活」，不重放整天的日志
-      $script:LogTail.pos = [Math]::Max(0L, $len - 65536)
+      # 回看尾部即可：要的是「最近一次用户意图」，不重放整天的日志
+      $script:LogTail.pos = [Math]::Max(0L, $len - $LogAttachLookbackBytes)
     }
 
     $len = (Get-Item -LiteralPath $path).Length
@@ -162,14 +182,27 @@ function Update-DesiredSession {
       if (-not $line) { continue }
       $m = [regex]::Match($line, '"event"\s*:\s*"([^"]+)"')
       if (-not $m.Success) { continue }
-      if ($ActivationEvents -notcontains $m.Groups[1].Value) { continue }
+      if ($IntentEvents -notcontains $m.Groups[1].Value) { continue }
       # 顶层 sessionId 在 context 之前，取第一个匹配
       $m = [regex]::Match($line, '"sessionId"\s*:\s*"(sess_[^"]+)"')
       if (-not $m.Success) { continue }
       $sid = $m.Groups[1].Value
       # 子代理会话不算「用户所在的会话」
       if ($sid -like 'sess_subagent_*') { continue }
+      # 意图时间取日志行自己的 timestamp，而不是读取时刻：回看历史日志（刚启动时）
+      # 不能因为「刚读到」就把几十分钟前的旧事件当成刚发生的意图。
+      $at = [DateTime]::UtcNow
+      $mt = [regex]::Match($line, '"timestamp"\s*:\s*"([^"]+)"')
+      if ($mt.Success) {
+        try {
+          $at = [DateTimeOffset]::Parse(
+            $mt.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        } catch { }
+      }
+      # 回看/乱序时不接受比当前意图更旧的事件，避免旧事件把新意图顶掉
+      if ($at -lt $script:IntentAtUtc) { continue }
       $script:DesiredSession = $sid
+      $script:IntentAtUtc = $at
     }
   } catch {
     # 日志只是导航信号，读不到不影响主功能
@@ -205,35 +238,28 @@ function Resolve-TargetFile {
   $newest = $files | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
   if (-not $newest) { return '' }
 
-  # 2) 日志事件指定的会话优先。它反映「用户刚切过去 / 刚敲了回车」，
-  #    比 rollout 落盘及时得多；但若它已明显落后最新活动，说明用户在别处干活，跟过去。
+  # 2) 用户意图优先：意图还在有效期内就无条件跟随它，别的会话写不写 rollout 都不参与判断。
+  #    这里刻意不再有「意图会话的文件比最新写入落后 ≥30s 就否掉意图」的规则：
+  #    并发时后台会话每完成一个请求就刷新自己的文件，而用户所在会话在思考期间不写文件，
+  #    那条规则必然把显示让给后台会话（实测：切过去后显示别的会话长达 102s / 131s）。
   if ($script:DesiredSession) {
-    $wantName = "model-io-$($script:DesiredSession).jsonl"
-    $desired = $files | Where-Object { $_.Name -eq $wantName } | Select-Object -First 1
-    if ($desired) {
-      if ($newest.FullName -eq $desired.FullName) {
-        $script:Stats.source = 'log'
+    $ageMs = ([DateTime]::UtcNow - $script:IntentAtUtc).TotalMilliseconds
+    if ($ageMs -lt $IntentTtlMs) {
+      $wantName = "model-io-$($script:DesiredSession).jsonl"
+      $desired = $files | Where-Object { $_.Name -eq $wantName } | Select-Object -First 1
+      if ($desired) {
+        $script:Stats.source = 'intent'
         return $desired.FullName
       }
-      $gapMs = ($newest.LastWriteTimeUtc - $desired.LastWriteTimeUtc).TotalMilliseconds
-      if ($gapMs -lt $DesiredStaleMs) {
-        $script:Stats.source = 'log'
-        return $desired.FullName
-      }
-    }
-    else {
-      # 归属指向一个还没有 rollout 文件的会话（用户刚切过去、它从未生成过）。
-      # 若此刻别的会话正在生成（最近 5 秒内有写入），视为日志信号已过期，
-      # 继续显示正在生成的会话；否则返回空，由调用方进入等待态显示。
-      $idleMs = ([DateTime]::UtcNow - $newest.LastWriteTimeUtc).TotalMilliseconds
-      if ($idleMs -ge 5000) {
-        $script:Stats.source = 'log-empty'
-        return ''
-      }
+      # 意图会话还没有 rollout 文件：刚切过去/刚建会话，或运行时被回收后文件已删除
+      # （实测 rollout 文件随会话运行时生灭）。如实显示「该会话暂无生成数据」，
+      # 而不是拿别的会话的数字顶上——那正是「切了会话却显示别人的 TPS」的来源。
+      $script:Stats.source = 'intent-wait'
+      return ''
     }
   }
 
-  # 3) 回退：最新写入的文件，带迟滞避免来回跳
+  # 3) 意图过期或没有意图：回退到最新写入的文件，带迟滞避免来回跳
   $script:Stats.source = 'mtime'
   $cur = $files | Where-Object { $_.FullName -eq $script:Tail.path } | Select-Object -First 1
   if ($cur) {
@@ -280,11 +306,15 @@ function Read-NewRecords {
   if (-not $Path) { return $out }
 
   if ($Path -ne $script:Tail.path) {
-    # 换会话了：游标归零并清空统计，避免把上一个会话的数混进来
+    # 换会话了：游标归零并清空统计，避免把上一个会话的数混进来。
+    # source 是 Resolve-TargetFile 刚刚判定的，要带过来——否则切换那一拍的
+    # status.json 会写成空 source，排查「为什么没跟着我切」时正好看到空值。
+    $src = $script:Stats.source
     $script:Tail.path = $Path
     $script:Tail.carry = ''
     $script:Stats = New-Stats
     $script:Stats.target = $Path
+    $script:Stats.source = $src
     $len = (Get-Item -LiteralPath $Path).Length
     $from = [Math]::Max(0L, $len - $LookbackBytes)
     $script:Tail.pos = Get-LineStartOffset -Path $Path -From $from
@@ -420,12 +450,13 @@ function Update-Stats {
     Update-DesiredSession
     $target = Resolve-TargetFile
     if (-not $target) {
-      if ($script:Stats.source -eq 'log-empty') {
-        # 归属已切到一个还没有生成数据的会话：清空数字、角标换成新会话、
-        # 底部显示等待文案。这不是错误，不能走 error 字段。
+      if ($script:Stats.source -eq 'intent-wait') {
+        # 用户意图指向的会话还没有 rollout 文件（刚切过去/刚建会话/运行时被回收）：
+        # 清空数字、角标换成该会话、底部显示等待文案。这不是错误，不能走 error 字段；
+        # 也绝不能退回显示别的会话的数字。
         $script:Stats = New-Stats
         $script:Stats.sessionId = $script:DesiredSession
-        $script:Stats.source = 'log-empty'
+        $script:Stats.source = 'intent-wait'
         $script:Stats.waiting = $true
         return
       }
@@ -468,11 +499,21 @@ function Write-Status {
   try {
     $lastAt = $null
     if ($script:Stats.lastAtUtc) { $lastAt = $script:Stats.lastAtUtc.ToString('o') }
+    # 意图的时间戳与剩余有效期：排查「显示为什么没跟着我切」时先看这两个
+    $intentAt = $null
+    $intentAgeMs = $null
+    if ($script:IntentAtUtc -gt [DateTime]::MinValue) {
+      $intentAt = $script:IntentAtUtc.ToString('o')
+      $intentAgeMs = [int](([DateTime]::UtcNow - $script:IntentAtUtc).TotalMilliseconds)
+    }
     $snapshot = [ordered]@{
       target              = $script:Stats.target
       source              = $script:Stats.source
       zcodeWin            = $script:ZCodeState
       desiredSession      = $script:DesiredSession
+      intentAtUtc         = $intentAt
+      intentAgeMs         = $intentAgeMs
+      intentTtlMs         = $IntentTtlMs
       model               = $script:Stats.model
       sessionId           = $script:Stats.sessionId
       turnId              = $script:Stats.turnId
@@ -882,15 +923,15 @@ $form.Add_MouseUp({
     if ($e.X -ge ($W - (Px 34)) -and $e.Y -le (Px 28)) { $form.Close() }
   })
 
-$form.Add_HandleCreated({
-    # WS_EX_NOACTIVATE：小窗永不成为前台窗口，创建/显示/点击都不抢 ZCode 的焦点。
-    # 必须在句柄创建后、首次显示前设好；没有它，「显示→抢焦点→ZCode 失去前台→
-    # 又被隐藏」会来回震荡，而且启动时会吃掉用户敲进 ZCode 的头几个键。
-    try {
-      $ex = [ZCodeNative.Dpi]::GetWindowLong($form.Handle, -20)
-      [void][ZCodeNative.Dpi]::SetWindowLong($form.Handle, -20, ($ex -bor 0x08000000))
-    } catch { }
-  })
+# 提前创建句柄并设 WS_EX_NOACTIVATE：小窗永不成为前台窗口，显示/点击/拖动都不抢
+# ZCode 的焦点。必须发生在首次显示之前——否则启动显示会激活自己；拖动时若小窗被
+# 点击激活成前台，还会出现「拖完→ZCode 失去前台→小窗被隐藏」的坏体验。
+# （实测在 HandleCreated 事件里设不生效，所以这里直接强制创建句柄后设。）
+try {
+  [void]$form.Handle
+  $ex = [ZCodeNative.Dpi]::GetWindowLong($form.Handle, -20)
+  [void][ZCodeNative.Dpi]::SetWindowLong($form.Handle, -20, ($ex -bor 0x08000000))
+} catch { }
 
 $form.Add_Shown({ Assert-TopMost })
 $form.Add_FormClosing({ Save-Pos })
