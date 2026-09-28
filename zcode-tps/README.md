@@ -3,6 +3,16 @@
 在 ZCode 界面**之外**开一个置顶小窗，实时显示模型生成速率（tok/s），并跟随你当前
 所在的会话。
 
+**English quickstart** — Windows 10+ only. Add this repo as a plugin marketplace
+(**Plugin Marketplace → Add → Add Plugin Marketplace**), install *ZCode TPS Monitor*,
+then start any task: the overlay appears automatically. Configure via
+`%LOCALAPPDATA%\ZCodeTpsMonitor\config.json` (UI language `auto` / `zh-CN` / `en-US`,
+opacity, ZCode data home, window matching). Stop with `/tps stop`; uninstalling the
+plugin stops and cleans up the watcher automatically.
+
+环境要求：Windows 10 及以上、Windows PowerShell 5.1+（系统自带）；macOS/Linux 不支持。
+企业策略的受限语言模式（CLM）下功能自动降级，小窗会标注「精简模式（系统策略限制）」。
+
 ZCode 插件系统没有 UI 扩展点（插件只能贡献 skills / commands / hooks / MCP / agents，
 manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录但不执行」），
 所以界面内嵌显示做不到。这个插件走的是另一条路：用 `SessionStart` hook 拉起一个
@@ -34,6 +44,22 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 定位——ZCode 是 Electron 窗口，`FindWindow` 实测搜不到，走的是
 `EnumWindows`。找不到 ZCode 窗口时（比如手动裸跑脚本）不做跟随动作，
 不会误关。
+
+## 配置
+
+`%LOCALAPPDATA%\ZCodeTpsMonitor\config.json`（可选 JSON，改完重启监控生效；
+`/tps stop` 后再 start，或重开会话）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `language` | `"auto"` | 界面语言：`auto` 跟随系统（zh 开头中文、其余英文），或 `zh-CN` / `en-US` |
+| `opacity` | `0.85` | 0.3–1.0 |
+| `zcodeHome` | `""` | ZCode 数据目录；空 = `%USERPROFILE%\.zcode\cli` |
+| `windowTitle` | `"ZCode"` | ZCode 主窗口匹配：窗口标题 |
+| `windowProcess` | `"ZCode"` | ZCode 主窗口匹配：进程名（安装渠道不同可能不同） |
+| `followForeground` | `true` | `false` = ZCode 不在前台时小窗也保持显示 |
+
+命令行参数优先于配置文件（排查时可临时覆盖）。深色主题是设计决定，不开放配置。
 
 ## 会话跟随
 
@@ -101,6 +127,10 @@ UI 无障碍树（§12 的开放问题）。
 
 ## 安装
 
+其他用户：仓库公开后，把仓库地址粘贴进 **插件市场 → 添加 → 添加插件市场** 即可，
+后续两步相同（发布形态见 [PORTABILITY.md](PORTABILITY.md) §2 L5）。
+本地开发这样装：
+
 1. 打开 **插件市场 → 添加 → 添加插件市场**，粘贴这个目录：
 
    ```
@@ -126,6 +156,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 
 # 调整窗口不透明度（0.3-1.0，默认 0.85）
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 -Opacity 0.7
+
+# 复制脚本到临时目录试用时，跳过「插件目录消失即退出」的看门狗
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 -NoWatchdog
 ```
 
 `status.json` 是排查入口，重点看：
@@ -133,6 +166,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 | 字段 | 说明 |
 |---|---|
 | `source` | 目标是怎么选出来的：`override`（手动钉死）/ `intent`（用户意图）/ `intent-wait`（意图会话还没有数据，等待态）/ `mtime`（意图过期后的兜底）/ `none` |
+| `pluginRoot` | 监控脚本所属的插件根目录；`/tps start` 用它定位脚本，卸载毒丸盯的是它的消失 |
 | `waiting` | 归属已切到某个会话但它还没有生成数据（窗口显示「该会话暂无生成数据」） |
 | `zcodeWin` | ZCode 主窗口状态：`normal` / `minimized` / `hidden`（不在前台，小窗已隐藏）/ `closed` / `none`（`none`=没找到，不跟随） |
 | `desiredSession` | 用户意图指向的会话；为空说明还没抓到 `turn.started` / `session.resumed` |
@@ -152,11 +186,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
   后台会话持续生成时不抢归属、幽灵会话不劫持、无数据会话的等待态不抖动、子代理不影响
   归属、意图过期后回落），退出码 0 即全部通过。
 
-## 关闭与卸载
+## 启停与卸载
 
-- 关窗口：点 `×`。下次 `SessionStart` 会再拉起。
-- 彻底卸载：在 **设置 → 插件管理 → 已安装** 里卸载；再删掉
-  `%LOCALAPPDATA%\ZCodeTpsMonitor` 目录（位置与状态缓存）。
+- 关窗口：悬停小窗点 `×`。下次 `SessionStart` 会再拉起。
+- 也可以用 `/tps start` / `/tps stop` 手动启停（`stop` 写哨兵文件，守护进程在
+  一个刷新周期内自己退出，不用杀进程）。
+- **卸载插件**：在 **设置 → 插件管理 → 已安装** 里卸载即可。守护进程每 2 秒检查
+  一次插件目录，目录消失（卸载/清缓存）后自动退出并清掉
+  `%LOCALAPPDATA%\ZCodeTpsMonitor` 下的位置/状态/配置文件，无需手工清理。
 
 ## 排查
 
