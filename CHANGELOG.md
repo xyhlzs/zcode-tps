@@ -6,7 +6,7 @@
 版本号同时写在 `zcode-tps/.zcode-plugin/plugin.json` 与根 `marketplace.json` 里，
 两处必须一致——`marketplace.json` 的 `version` 决定用户在插件市场看到的版本。
 
-> 尚未打 git tag，也没有 GitHub Release。下面的日期是「该版本代码进入 master 的日期」。
+> 尚未打 git tag，也没有 GitHub Release。下面的日期是「该版本代码进入 main 分支的日期」。
 
 ## [Unreleased]
 
