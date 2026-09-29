@@ -24,10 +24,20 @@
     创建里 24 次创建后没有任何对话活动），采纳它们会把显示目标劫持到一个
     永远没有数据的会话上。
 
-  标题：会话标题（session.title）只存在于 db.sqlite，而 PS 5.1 没有 SQLite
-  provider（DESIGN.md §3.3），由 node sidecar（tps-sidecar.mjs，node:sqlite
-  只读轮询）经交换文件 sidecar.json 递过来；没有 node 或 sidecar 连续失败时
-  退回 id 前 8 位（DESIGN.md §9）。
+  sidecar：会话标题与活跃会话的流式字节都只存在于 db.sqlite，而 PS 5.1 没有
+  SQLite provider（DESIGN.md §3.3），由 node sidecar（tps-sidecar.mjs，node:sqlite
+  只读轮询）经交换文件 sidecar.json 递过来（DESIGN.md §8 数据契约：titles 全量
+  + sessions 活跃集，每项带当前 assistant message 的分类型字节数）；没有 node 或
+  sidecar 连续失败时退回 id 前 8 位、估算与并列展示不可用（DESIGN.md §9）。
+
+  速率三层（DESIGN.md §6，诚实度不同，界面上能看出来）：
+    L1 在飞状态   日志 started/completed 按 sessionId/parentSpanId 配对，真值；
+                  提供状态点、计时（≤1s 刷新）。
+    L2 请求真值   rollout 落盘后 outputTokens ÷ durationMs，权威数字。
+    L3 在飞估算   sidecar 快照里当前 message 的 reasoning/text 字节增量 × 换算
+                  系数 k，5 秒滑动窗口；显示为 ≈N（估算色），窗口内落库不足
+                  2 次时不显示——没有依据就不出数字（FR1-4）。k 由最近完成的
+                  请求按 usage 真值标定。
 
   == 为什么不用 ConvertFrom-Json ==
   单条 rollout 记录里 request.messages 带完整对话历史，长会话下单条可达数 MB，
@@ -144,6 +154,9 @@ $script:StrTables = @{
     maxFmt     = '最高 {0}'
     idFmt      = 'id {0}'
     noModel    = '等待输出'
+    elapsedFmt = '已 {0:N1}s'
+    moreFmt    = '+{0}'
+    header     = 'ZCode TPS'
   }
   en = @{
     unit       = 'tok/s'
@@ -158,6 +171,9 @@ $script:StrTables = @{
     maxFmt     = 'Peak {0}'
     idFmt      = 'id {0}'
     noModel    = 'Waiting for output'
+    elapsedFmt = '{0:N1}s'
+    moreFmt    = '+{0}'
+    header     = 'ZCode TPS'
   }
 }
 $script:Lang = 'en'
@@ -228,7 +244,9 @@ $script:IntentAtUtc = [DateTime]::MinValue                     # 该意图的日
 $script:ZCodeHwnd = [IntPtr]::Zero                             # ZCode 主窗口句柄缓存
 $script:ZCodeSeen = $false                                     # 是否成功找到过 ZCode 窗口
 $script:ZCodeState = 'none'                                    # none / normal / minimized / closed
-$script:ReqStart = $null                                       # 在飞请求 { sid, utc }（L1 信号，见 DESIGN.md §6）
+# 在飞请求表（L1，DESIGN.md §6）：sessionId → @{ utc; span }。v1 只跟踪单个请求，
+# 并发多任务各自在飞时只有一个计时；'_' 键承接没有 sessionId 的 started 事件。
+$script:ReqStarts = @{}
 $script:Hovered = $false                                       # 鼠标是否悬停在小窗上（控制 × 显隐）
 
 # 标题 sidecar（tps-sidecar.mjs）的生命周期状态，重启/放弃策略见 DESIGN.md §9
@@ -237,6 +255,19 @@ $script:SidecarProc = $null
 $script:SidecarFails = 0        # 连续「无新鲜快照」次数，≥3 放弃，退回 id 短码
 $script:SidecarDead = $false
 $script:TitleMap = @{}          # sessionId → title，来自 sidecar 快照
+$script:SidecarSessions = @()   # DESIGN.md §8 契约的活跃会话数组（含分类型字节）
+
+# L3 在飞估算（DESIGN.md §6）：每个在飞会话的字节采样窗口 + 全局换算系数标定。
+# 窗口 7 秒（5s 计算 + 余量），msgId 变了就重开——message 边界处的字节不可比。
+$script:EstimWinMs = 7000
+$script:EstimWin = @{}          # sessionId → @{ samples=@(); msgId='' }
+$script:Calib = @{
+  reasoning = @{ samples = @() }   # 元素 @{ tok; bytes }，k = Σtok ÷ Σbytes
+  text      = @{ samples = @() }
+}
+$script:CalibMaxSamples = 8     # 只用最近 N 次配对，模型/语言变化后旧标定自动淡出
+$script:CalibBase = @{}         # sessionId → @{ b0r; b0x; msgId }，请求开始时的字节基线
+$script:CalibDefaultK = 0.25    # 无标定数据时的粗估（tok/byte，中文/JSON 混合量级），会被真值修正
 
 $script:Drag = $false
 $script:DragMoved = $false
@@ -272,8 +303,9 @@ function Start-Sidecar {
 }
 
 function Update-Sidecar {
-  if ($Headless -or $script:SidecarDead) { return }
-  # 快照年龄：sidecar 按 4Hz 覆盖写，3s 内算新鲜；文件缺失按无穷大处理
+  if ($script:SidecarDead) { return }
+  # 快照年龄：sidecar 按 4Hz 覆盖写，3s 内算新鲜；文件缺失按无穷大处理。
+  # Headless 下不启动 sidecar 进程，但快照照读——受控测试注入假快照用。
   $ageMs = [double]::PositiveInfinity
   try {
     if (Test-Path -LiteralPath $SidecarSnap) {
@@ -288,10 +320,35 @@ function Update-Sidecar {
         foreach ($p in $snap.titles.PSObject.Properties) { $map[$p.Name] = [string]$p.Value }
       }
       $script:TitleMap = $map
+      # DESIGN.md §8 契约：sessions 数组（活跃会话 + 当前 message 分类型字节）。
+      # 旧版快照没有该字段 → 空数组，估算与并列展示退回不可用。
+      $list = @()
+      if ($snap -and $snap.sessions) {
+        foreach ($s in @($snap.sessions)) {
+          $parts = $null
+          if ($s.parts) {
+            $parts = @{
+              reasoning = [long]$s.parts.reasoning
+              text      = [long]$s.parts.text
+              other     = [long]$s.parts.other
+            }
+          }
+          $list += @{
+            id           = [string]$s.id
+            title        = [string]$s.title
+            lastActiveMs = [long]$s.lastActiveMs
+            msgId        = [string]$s.msgId
+            msgSeq       = $s.msgSeq
+            parts        = $parts
+          }
+        }
+      }
+      $script:SidecarSessions = $list
       $script:SidecarFails = 0
     } catch { }   # 读到半截：沿用上一份快照（DESIGN.md §9）
     return
   }
+  if ($Headless) { return }   # 无头/测试不管理 sidecar 进程
   $procAlive = $false
   try { $procAlive = ($script:SidecarProc -and -not $script:SidecarProc.HasExited) } catch { }
   if ($procAlive -and $ageMs -lt 10000) { return }   # 启动初期的空窗，等下一拍
@@ -363,9 +420,11 @@ function Update-DesiredSession {
       $m = [regex]::Match($line, '"event"\s*:\s*"([^"]+)"')
       if (-not $m.Success) { continue }
       # 在飞跟踪（L1，DESIGN.md §6）：started 与 completed 按 sessionId 配对，
-      # 给界面提供「正在生成 · 已 Xs」。completed 可能不带 sessionId，此时视为
-      # 当前跟踪请求的结束；子代理的请求不触发计时。started 时间取日志行自己的
-      # timestamp——刚启动回看历史日志时，不能把几十秒前的开始当成刚刚发生。
+      # completed 实测带 parentSpanId = started 的 spanId，作为兜底配对键。
+      # completed 可能不带 sessionId，此时只清 '_'（v1 语义：视为当前跟踪请求的
+      # 结束）——并发下绝不能因为它清掉别的会话的计时。子代理的请求不触发计时。
+      # started 时间取日志行自己的 timestamp——刚启动回看历史日志时，不能把几十秒
+      # 前的开始当成刚刚发生。
       if ($m.Groups[1].Value -eq 'model.request.started') {
         $ms = [regex]::Match($line, '"sessionId"\s*:\s*"(sess_[^"]+)"')
         if (-not $ms.Success -or $ms.Groups[1].Value -notlike 'sess_subagent_*') {
@@ -379,20 +438,47 @@ function Update-DesiredSession {
                 $mt.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture).UtcDateTime
             } catch { }
           }
-          $script:ReqStart = @{ sid = $sid; utc = $at }
+          $span = ''
+          $mspan = [regex]::Match($line, '"spanId"\s*:\s*"([^"]+)"')
+          if ($mspan.Success) { $span = $mspan.Groups[1].Value }
+          $key = $sid
+          if (-not $key) { $key = '_' }
+          $script:ReqStarts[$key] = @{ utc = $at; span = $span }
+          # L3 标定基线：请求开始时该会话当前 message 的字节（Add-Record 完成时配对）
+          $base = $script:CalibBase[$key]
+          if (-not $base) {
+            $base = @{ b0r = -1L; b0x = -1L; msgId = ''; utc = $at }
+            $cur = $null
+            foreach ($ss in $script:SidecarSessions) { if ($ss.id -eq $sid) { $cur = $ss; break } }
+            if ($cur -and $cur.parts) {
+              $base.b0r = [long]$cur.parts.reasoning
+              $base.b0x = [long]$cur.parts.text
+              $base.msgId = [string]$cur.msgId
+            }
+            $script:CalibBase[$key] = $base
+          }
         }
         continue
       }
       if ($m.Groups[1].Value -eq 'model.request.completed') {
         $ms = [regex]::Match($line, '"sessionId"\s*:\s*"(sess_[^"]+)"')
-        if (-not $ms.Success) {
-          $script:ReqStart = $null
+        $done = $false
+        if ($ms.Success) {
+          $sid = $ms.Groups[1].Value
+          if ($script:ReqStarts.ContainsKey($sid)) { $script:ReqStarts.Remove($sid); $done = $true }
         }
         else {
-          $sid = $ms.Groups[1].Value
-          if ($sid -notlike 'sess_subagent_*' -and
-            (-not $script:ReqStart -or $script:ReqStart.sid -eq $sid)) {
-            $script:ReqStart = $null
+          # completed.parentSpanId == started.spanId 的兜底配对（实测该字段在）
+          $mp = [regex]::Match($line, '"parentSpanId"\s*:\s*"([^"]+)"')
+          if ($mp.Success) {
+            $hit = $null
+            foreach ($k in @($script:ReqStarts.Keys)) {
+              if ($k -ne '_' -and $script:ReqStarts[$k].span -eq $mp.Groups[1].Value) { $hit = $k; break }
+            }
+            if ($hit) { $script:ReqStarts.Remove($hit); $done = $true }
+          }
+          if (-not $done -and $script:ReqStarts.ContainsKey('_')) {
+            $script:ReqStarts.Remove('_'); $done = $true
           }
         }
         continue
@@ -517,48 +603,59 @@ function Get-LineStartOffset {
 function Read-NewRecords {
   param([string]$Path)
 
-  $out = @()
-  if (-not $Path) { return $out }
-
+  if (-not $Path) { return @() }
   if ($Path -ne $script:Tail.path) {
     # 换会话了：游标归零并清空统计，避免把上一个会话的数混进来。
     # source 是 Resolve-TargetFile 刚刚判定的，要带过来——否则切换那一拍的
     # status.json 会写成空 source，排查「为什么没跟着我切」时正好看到空值。
     $src = $script:Stats.source
-    $script:Tail.path = $Path
-    $script:Tail.carry = ''
     $script:Stats = New-Stats
     $script:Stats.target = $Path
     $script:Stats.source = $src
+  }
+  return @(Read-TailLines -Tail $script:Tail -Path $Path -Lookback $LookbackBytes)
+}
+
+# 通用 rollout 增量读取：首次接入从尾部 $Lookback 字节处行对齐起读，之后只读增量。
+# 主游标（$script:Tail）与多行模式每会话的轻量游标共用（DESIGN.md §7.3）。
+function Read-TailLines {
+  param($Tail, [string]$Path, [long]$Lookback = 0L)
+
+  $out = @()
+  if (-not $Path) { return $out }
+
+  if ($Path -ne $Tail.path) {
+    $Tail.path = $Path
+    $Tail.carry = ''
     $len = (Get-Item -LiteralPath $Path).Length
-    $from = [Math]::Max(0L, $len - $LookbackBytes)
-    $script:Tail.pos = Get-LineStartOffset -Path $Path -From $from
+    $from = [Math]::Max(0L, $len - $Lookback)
+    $Tail.pos = Get-LineStartOffset -Path $Path -From $from
   }
 
   $len = (Get-Item -LiteralPath $Path).Length
-  if ($len -lt $script:Tail.pos) {
+  if ($len -lt $Tail.pos) {
     # 文件被截断或轮转
-    $script:Tail.pos = 0L
-    $script:Tail.carry = ''
+    $Tail.pos = 0L
+    $Tail.carry = ''
   }
-  if ($len -le $script:Tail.pos) { return $out }
+  if ($len -le $Tail.pos) { return $out }
 
   $buf = $null
   $read = 0
   $fs = New-Object System.IO.FileStream(
     $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
-    [void]$fs.Seek($script:Tail.pos, [System.IO.SeekOrigin]::Begin)
-    $buf = New-Object byte[] ($len - $script:Tail.pos)
+    [void]$fs.Seek($Tail.pos, [System.IO.SeekOrigin]::Begin)
+    $buf = New-Object byte[] ($len - $Tail.pos)
     $read = $fs.Read($buf, 0, $buf.Length)
-    $script:Tail.pos += $read
+    $Tail.pos += $read
   } finally {
     $fs.Dispose()
   }
 
-  $text = $script:Tail.carry + [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+  $text = $Tail.carry + [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
   $parts = $text -split "`n"
-  $script:Tail.carry = $parts[$parts.Length - 1]
+  $Tail.carry = $parts[$parts.Length - 1]
 
   for ($i = 0; $i -lt $parts.Length - 1; $i++) {
     $line = $parts[$i].Trim()
@@ -654,6 +751,8 @@ function Add-Record {
   if ($r.model) { $script:Stats.model = $r.model }
   if ($r.sessionId) { $script:Stats.sessionId = $r.sessionId }
 
+  Invoke-RecordCalib -r $r
+
   $spark = @($script:Stats.spark)
   $spark += [double]$script:Stats.lastTps
   if ($spark.Count -gt 40) { $spark = $spark[($spark.Count - 40)..($spark.Count - 1)] }
@@ -663,6 +762,9 @@ function Add-Record {
 function Update-Stats {
   try {
     Update-DesiredSession
+    Update-Estimates
+    Update-SessionTails
+    Get-OverlayRows
     $target = Resolve-TargetFile
     if (-not $target) {
       if ($script:Stats.source -eq 'intent-wait') {
@@ -700,14 +802,289 @@ function Get-SessTps {
   return $null
 }
 
+# ------------------------------------------------------------------ L3 在飞估算（DESIGN.md §6）
+# 数据来自 sidecar 快照里当前 message 的 reasoning/text 字节。DB 落库是中位 3.5s
+# 一次的跳跃补齐（§3.1），所以速率必须走滑动窗口，且窗口内落库不足 2 次不显示——
+# 没有依据就不出数字（FR1-4）。换算系数 k 由已完成的请求按 usage 真值标定。
+
+function Get-CalibK {
+  param([string]$Type)
+  $c = $script:Calib[$Type]
+  if ($c -and $c.samples.Count -gt 0) {
+    $tok = 0.0
+    $bytes = 0.0
+    foreach ($s in $c.samples) { $tok += $s.tok; $bytes += $s.bytes }
+    if ($bytes -gt 0) { return $tok / $bytes }
+  }
+  return $script:CalibDefaultK
+}
+
+function Add-CalibSample {
+  param([string]$Type, [double]$Tok, [double]$Bytes)
+  if ($Tok -le 0 -or $Bytes -le 0) { return }
+  $c = $script:Calib[$Type]
+  $c.samples += @{ tok = $Tok; bytes = $Bytes }
+  if ($c.samples.Count -gt $script:CalibMaxSamples) {
+    $c.samples = @($c.samples | Select-Object -Skip ($c.samples.Count - $script:CalibMaxSamples))
+  }
+}
+
+function Test-SessionInFlight {
+  param([string]$SessionId)
+  # '_' 承接无 sessionId 的 started：视为当前显示会话在飞（v1 语义）
+  if ($script:ReqStarts.ContainsKey('_')) { return $true }
+  if ($SessionId -and $script:ReqStarts.ContainsKey($SessionId)) { return $true }
+  return $false
+}
+
+function Get-InFlightElapsed {
+  param([string]$SessionId)
+  # 返回该会话在飞已进行的秒数；不在飞返回 $null。优先精确匹配本会话的请求
+  $e = $null
+  if ($SessionId -and $script:ReqStarts.ContainsKey($SessionId)) { $e = $script:ReqStarts[$SessionId] }
+  elseif ($script:ReqStarts.ContainsKey('_')) { $e = $script:ReqStarts['_'] }
+  if (-not $e) { return $null }
+  return ([DateTime]::UtcNow - $e.utc).TotalSeconds
+}
+
+function Update-Estimates {
+  # 每拍调用（在 Update-DesiredSession 之后）：给每个在飞会话推一个字节采样。
+  # 顺带清理：completed 丢失（回看截断/日志轮转）的在飞条目按 10 分钟兜底删除，
+  # 未配对成功的标定基线同理。
+  try {
+    $nowUtc = [DateTime]::UtcNow
+    foreach ($key in @($script:ReqStarts.Keys)) {
+      if (($nowUtc - $script:ReqStarts[$key].utc).TotalSeconds -gt 600) { $script:ReqStarts.Remove($key) }
+    }
+    foreach ($key in @($script:CalibBase.Keys)) {
+      if (($nowUtc - $script:CalibBase[$key].utc).TotalSeconds -gt 600) { $script:CalibBase.Remove($key) }
+    }
+    foreach ($key in @($script:ReqStarts.Keys)) {
+      if ($key -eq '_') { continue }
+      $cur = $null
+      foreach ($ss in $script:SidecarSessions) { if ($ss.id -eq $key) { $cur = $ss; break } }
+      if (-not $cur -or -not $cur.parts) { continue }
+      $win = $script:EstimWin[$key]
+      if (-not $win -or $win.msgId -ne [string]$cur.msgId) {
+        # 换了 message（新请求开始写新的 assistant message）：字节从零起算，
+        # 跨 message 的字节数不可比，窗口重开
+        $win = @{ samples = @(); msgId = [string]$cur.msgId }
+        $script:EstimWin[$key] = $win
+      }
+      $win.samples += @{
+        t = $nowUtc
+        r = [long]$cur.parts.reasoning
+        x = [long]$cur.parts.text
+      }
+      $cutoff = $nowUtc.AddMilliseconds(-$script:EstimWinMs)
+      while ($win.samples.Count -gt 0 -and $win.samples[0].t -lt $cutoff) {
+        $win.samples = @($win.samples | Select-Object -Skip 1)
+      }
+    }
+    # 不再在飞的会话窗口随手清掉，不积累
+    foreach ($sid in @($script:EstimWin.Keys)) {
+      if (-not $script:ReqStarts.ContainsKey($sid)) { $script:EstimWin.Remove($sid) }
+    }
+  } catch { }
+}
+
+function Get-EstimTps {
+  param([string]$SessionId)
+  # 5 秒滑动窗口的字节增量 × k；窗口内落库不足 2 次或取不到增量时返回 $null
+  $win = $script:EstimWin[$SessionId]
+  if (-not $win -or $win.samples.Count -lt 2) { return $null }
+  $samples = $win.samples
+  $changes = 0
+  for ($i = 1; $i -lt $samples.Count; $i++) {
+    if (($samples[$i].r + $samples[$i].x) -ne ($samples[$i - 1].r + $samples[$i - 1].x)) { $changes++ }
+  }
+  if ($changes -lt 2) { return $null }
+  $first = $samples[0]
+  $last = $samples[$samples.Count - 1]
+  $dt = ($last.t - $first.t).TotalSeconds
+  if ($dt -le 0) { return $null }
+  # 字节理论上只增；窗口重开/异常快照的防御性钳制
+  $dR = [Math]::Max(0L, ([long]$last.r - [long]$first.r))
+  $dX = [Math]::Max(0L, ([long]$last.x - [long]$first.x))
+  if (($dR + $dX) -le 0) { return $null }
+  $rate = $dR * (Get-CalibK -Type 'reasoning') + $dX * (Get-CalibK -Type 'text')
+  $rate = $rate / $dt
+  if ($rate -le 0) { return $null }
+  return $rate
+}
+
+function Invoke-RecordCalib {
+  param($r)
+  # 请求完成落盘（Add-Record）时，用 usage 真值修正换算系数（DESIGN.md §6 L2）。
+  # 只在主 Stats 路径调用：并发行各自的 tail 不标定，避免同一请求重复配对。
+  $sid = $script:Stats.sessionId
+  if (-not $sid) { return }
+  $base = $script:CalibBase[$sid]
+  if (-not $base -or $base.b0r -lt 0) { return }
+  $script:CalibBase.Remove($sid)
+  $cur = $null
+  foreach ($ss in $script:SidecarSessions) { if ($ss.id -eq $sid) { $cur = $ss; break } }
+  if (-not $cur -or -not $cur.parts) { return }
+  # 基线与完成时必须是同一个 message，否则这轮字节归不到这次请求
+  if ([string]$cur.msgId -ne [string]$base.msgId) { return }
+  $dR = [long]$cur.parts.reasoning - [long]$base.b0r
+  $dX = [long]$cur.parts.text - [long]$base.b0x
+  # 小样本噪声大：增量字节低于阈值不标定
+  if ($dR -ge 300) {
+    Add-CalibSample -Type 'reasoning' -Tok ([double]$r.reasoningTokens) -Bytes ([double]$dR)
+  }
+  if ($dX -ge 300) {
+    # outputTokens 含工具调用 token 而 tool part 不参与换算，text 类系数会略偏高；
+    # A4（±20%）门槛下可接受，DESIGN.md §12 已记录
+    Add-CalibSample -Type 'text' -Tok ([double]($r.outputTokens - $r.reasoningTokens)) -Bytes ([double]$dX)
+  }
+}
+
+# ------------------------------------------------------------------ 多会话并列数据层（DESIGN.md §7.2/§7.3）
+# 「猜一个」改成「全都列出来」：活跃会话各行并列、在飞行置顶高亮、上限 5 行折叠。
+# 单会话/无 sidecar 时退回 v1 紧凑卡片。每行的速率来自各会话自己的 rollout tail。
+
+$script:ActiveWindowMs = 300000    # 活跃窗口：session.time_updated 在最近 5 分钟内
+$script:MaxRows = 5                # 行数上限，超出折叠为 +N
+$script:SessionTails = @{}         # sessionId → 轻量游标与统计（非主目标的活跃会话）
+$script:OverlayRows = @()          # 每拍组装的行数据（渲染与 status.json 共用）
+$script:MoreRows = 0               # 被折叠的行数
+
+function Get-ActiveSessions {
+  $out = @()
+  $cutoff = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $script:ActiveWindowMs
+  foreach ($s in $script:SidecarSessions) {
+    if ($s.id -like 'sess_subagent_*') { continue }   # sidecar 已滤，双保险
+    if ($s.lastActiveMs -lt $cutoff) { continue }
+    $out += $s
+  }
+  return $out
+}
+
+function Update-SessionTails {
+  # 活跃会话各自的 rollout tail：多行模式下空闲行的 L2 真值来源（§7.3）。
+  # 主 Stats 会话照旧走单游标，这里只管其余行。文件随会话运行时生灭：
+  # 消失时重置游标与统计，不残留旧数字。
+  try {
+    $keep = @{}
+    foreach ($s in @(Get-ActiveSessions)) {
+      $sid = $s.id
+      if ($sid -eq $script:Stats.sessionId) { continue }   # 主会话的行用主 Stats，不重复 tail
+      $keep[$sid] = $true
+      $t = $script:SessionTails[$sid]
+      if (-not $t) {
+        $t = @{ path = ''; pos = 0L; carry = ''; lastTps = $null; lastAtUtc = $null; sessOut = 0; sessMs = 0.0; requests = 0; model = '' }
+        $script:SessionTails[$sid] = $t
+      }
+      $path = Join-Path $RolloutDir ("model-io-$sid.jsonl")
+      if (-not (Test-Path -LiteralPath $path)) {
+        $t.path = ''
+        $t.pos = 0L
+        $t.carry = ''
+        $t.lastTps = $null
+        $t.lastAtUtc = $null
+        continue
+      }
+      foreach ($line in @(Read-TailLines -Tail $t -Path $path -Lookback $LookbackBytes)) {
+        $rec = Parse-Record -Line $line
+        if (-not $rec -or $rec.durationMs -le 0) { continue }
+        $t.lastTps = $rec.outputTokens / ($rec.durationMs / 1000.0)
+        $t.lastAtUtc = [DateTime]::UtcNow
+        $t.sessOut += $rec.outputTokens
+        $t.sessMs += $rec.durationMs
+        $t.requests++
+        if ($rec.model) { $t.model = $rec.model }
+      }
+    }
+    foreach ($sid in @($script:SessionTails.Keys)) {
+      if (-not $keep.ContainsKey($sid)) { $script:SessionTails.Remove($sid) }
+    }
+  } catch { }
+}
+
+function Get-OverlayRows {
+  # 行数据：在飞行置顶（后开始的在前），空闲行按 lastActiveMs 降序；超出 $MaxRows 折叠。
+  # 主目标会话保证在场（哪怕 sidecar 活跃窗口没罩住它）——显示目标可核对是 FR2-3。
+  $script:OverlayRows = @()
+  $script:MoreRows = 0
+  try {
+    $mainSid = $script:Stats.sessionId
+    if (-not $mainSid -and $script:DesiredSession) { $mainSid = $script:DesiredSession }
+    $cands = @()
+    $hasMain = $false
+    foreach ($s in @(Get-ActiveSessions)) {
+      if ($s.id -eq $mainSid) { $hasMain = $true }
+      $cands += $s
+    }
+    if ($mainSid -and -not $hasMain) {
+      $t = ''
+      try { $t = [string]$script:TitleMap[$mainSid] } catch { }
+      $cands += @{ id = $mainSid; title = $t; lastActiveMs = 0; msgId = ''; parts = $null }
+    }
+
+    $rows = @()
+    foreach ($s in $cands) {
+      $sid = [string]$s.id
+      if (-not $sid) { continue }
+      $tps = $null
+      $tpsAt = $null
+      $out = 0
+      if ($sid -eq $script:Stats.sessionId) {
+        $tps = $script:Stats.lastTps
+        $tpsAt = $script:Stats.lastAtUtc
+        $out = $script:Stats.sessOut
+      }
+      else {
+        $t = $script:SessionTails[$sid]
+        if ($t) { $tps = $t.lastTps; $tpsAt = $t.lastAtUtc; $out = $t.sessOut }
+      }
+      $inFl = Test-SessionInFlight -SessionId $sid
+      $elapsed = $null
+      $estim = $null
+      if ($inFl) {
+        $elapsed = Get-InFlightElapsed -SessionId $sid
+        $estim = Get-EstimTps -SessionId $sid
+      }
+      $title = [string]$s.title
+      if (-not $title) {
+        try { $title = [string]$script:TitleMap[$sid] } catch { }
+      }
+      $rows += @{
+        sid          = $sid
+        title        = $title
+        lastActiveMs = [long]$s.lastActiveMs
+        tps          = $tps
+        tpsAt        = $tpsAt
+        out          = $out
+        inFlight     = $inFl
+        elapsed      = $elapsed
+        estim        = $estim
+      }
+    }
+
+    $inFlightRows = @($rows | Where-Object { $_.inFlight } | Sort-Object { $_.elapsed })
+    $idleRows = @($rows | Where-Object { -not $_.inFlight } | Sort-Object lastActiveMs -Descending)
+    $ordered = @($inFlightRows) + @($idleRows)
+    if ($ordered.Count -gt $script:MaxRows) {
+      $script:MoreRows = $ordered.Count - $script:MaxRows
+      $ordered = @($ordered[0..($script:MaxRows - 1)])
+    }
+    $script:OverlayRows = $ordered
+  } catch {
+    $script:OverlayRows = @()
+    $script:MoreRows = 0
+  }
+}
+
 function Get-ShortSessionId {
   # 会话短码：FR1-5 要求显示目标可核对。标题 sidecar（tps-sidecar.mjs）取到
   # 人能读懂的标题时显示标题，这里只在 sidecar 不可用（无 node / 连续失败）时兜底。
-  $sid = $script:Stats.sessionId
-  if (-not $sid) { return '' }
-  $sid = $sid -replace '^sess_', ''
-  if ($sid.Length -gt 8) { return $sid.Substring(0, 8) }
-  return $sid
+  param([string]$Sid = '')
+  if (-not $Sid) { $Sid = $script:Stats.sessionId }
+  if (-not $Sid) { return '' }
+  $Sid = $Sid -replace '^sess_', ''
+  if ($Sid.Length -gt 8) { return $Sid.Substring(0, 8) }
+  return $Sid
 }
 
 function Get-SessionTitle {
@@ -748,6 +1125,25 @@ function Write-Status {
       intentAgeMs         = $intentAgeMs
       intentTtlMs         = $IntentTtlMs
       sidecar             = $sidecarState
+      inFlight            = (Test-SessionInFlight -SessionId $script:Stats.sessionId)
+      inFlightElapsedSec  = (Get-InFlightElapsed -SessionId $script:Stats.sessionId)
+      estimTps            = (Get-EstimTps -SessionId $script:Stats.sessionId)
+      calibReasoningK     = (Get-CalibK -Type 'reasoning')
+      calibTextK          = (Get-CalibK -Type 'text')
+      calibReasoningN     = $script:Calib.reasoning.samples.Count
+      calibTextN          = $script:Calib.text.samples.Count
+      activeSessions      = @($script:SidecarSessions).Count
+      rows                = @($script:OverlayRows | ForEach-Object {
+          [ordered]@{
+            sessionId  = $_.sid
+            title      = $_.title
+            tps        = $_.tps
+            inFlight   = $_.inFlight
+            elapsedSec = $_.elapsed
+            estimTps   = $_.estim
+          }
+        })
+      moreRows            = $script:MoreRows
       model               = $script:Stats.model
       sessionId           = $script:Stats.sessionId
       sessionTitle        = (Get-SessionTitle)
@@ -800,10 +1196,12 @@ if ($Headless) {
   $deadline = [DateTime]::MaxValue
   if ($Seconds -gt 0) { $deadline = (Get-Date).AddSeconds($Seconds) }
   while ((Get-Date) -lt $deadline) {
+    Update-Sidecar   # 无头不启动 sidecar，但读快照：受控测试注入假快照用
     Update-Stats
     Write-Status
     Start-Sleep -Milliseconds 400
   }
+  Update-Sidecar
   Update-Stats
   Write-Status
   exit 0
@@ -858,6 +1256,17 @@ function Px {
 $W = [int](Px 216)
 $H = [int](Px 140)
 
+# 多行模式（DESIGN.md §7.2）尺寸：宽一点给标题留位置，高度随行数自适应；
+# 单会话/无 sidecar 时退回 v1 紧凑卡片（$W×$H 不变）
+$script:SingleW = $W
+$script:SingleH = $H
+$script:MultiW = [int](Px 300)
+$script:MultiHeaderH = [int](Px 24)
+$script:RowHIdle = [int](Px 26)
+$script:RowHActive = [int](Px 42)
+$script:MultiPadB = [int](Px 8)
+$script:MultiMode = $false
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'ZCode TPS'
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
@@ -872,15 +1281,48 @@ $form.Opacity = $Opacity
 $dbProp = $form.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic')
 if ($dbProp) { $dbProp.SetValue($form, $true) }
 
-# 圆角
-$rad = Px 6
-$gp = New-Object System.Drawing.Drawing2D.GraphicsPath
-$gp.AddArc(0, 0, $rad, $rad, 180, 90)
-$gp.AddArc(($W - $rad), 0, $rad, $rad, 270, 90)
-$gp.AddArc(($W - $rad), ($H - $rad), $rad, $rad, 0, 90)
-$gp.AddArc(0, ($H - $rad), $rad, $rad, 90, 90)
-$gp.CloseFigure()
-$form.Region = New-Object System.Drawing.Region($gp)
+# 圆角（单卡/多行切换会重建窗口尺寸，Region 要跟着重画）
+function Set-OverlayRegion {
+  param([int]$w, [int]$h)
+  $rad = Px 6
+  $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $gp.AddArc(0, 0, $rad, $rad, 180, 90)
+  $gp.AddArc(($w - $rad), 0, $rad, $rad, 270, 90)
+  $gp.AddArc(($w - $rad), ($h - $rad), $rad, $rad, 0, 90)
+  $gp.AddArc(0, ($h - $rad), $rad, $rad, 90, 90)
+  $gp.CloseFigure()
+  $old = $form.Region
+  $form.Region = New-Object System.Drawing.Region($gp)
+  if ($old) { $old.Dispose() }
+}
+Set-OverlayRegion -w $W -h $H
+
+# 单卡 ↔ 多行切换：只在实际变化时动 ClientSize（每拍调用，避免布局抖动）
+function Update-OverlayShape {
+  param([bool]$Multi, [int]$VisualRows)
+  $w = $script:SingleW
+  $h = $script:SingleH
+  if ($Multi) {
+    $w = $script:MultiW
+    $h = $script:MultiHeaderH + $script:MultiPadB
+    for ($i = 0; $i -lt $VisualRows; $i++) {
+      if ($script:OverlayRows[$i] -and $script:OverlayRows[$i].inFlight) { $h += $script:RowHActive }
+      else { $h += $script:RowHIdle }
+    }
+  }
+  if ($script:MultiMode -ne $Multi -or $form.ClientSize.Width -ne $w -or $form.ClientSize.Height -ne $h) {
+    $script:MultiMode = $Multi
+    $form.ClientSize = New-Object System.Drawing.Size($w, $h)
+    Set-OverlayRegion -w $w -h $h
+    # 变大后可能出屏：钳回虚拟屏
+    try {
+      $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+      $form.Location = New-Object System.Drawing.Point(
+        [Math]::Max($vs.Left, [Math]::Min($form.Left, $vs.Right - $w)),
+        [Math]::Max($vs.Top, [Math]::Min($form.Top, $vs.Bottom - $h)))
+    } catch { }
+  }
+}
 
 # 位置：优先上次，其次右下角
 $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
@@ -914,9 +1356,11 @@ try {
 } catch { }
 
 $script:Fonts = @{
-  hero = New-Object System.Drawing.Font($heroFamily, 30, $heroStyle)
-  unit = New-Object System.Drawing.Font('Segoe UI', 8.5)
-  stat = New-Object System.Drawing.Font('Segoe UI', 8)
+  hero     = New-Object System.Drawing.Font($heroFamily, 30, $heroStyle)
+  unit     = New-Object System.Drawing.Font('Segoe UI', 8.5)
+  stat     = New-Object System.Drawing.Font('Segoe UI', 8)
+  rowTitle = New-Object System.Drawing.Font('Segoe UI', 8.5)          # 多行模式会话标题（VISUAL.md §3.2）
+  rowNum   = New-Object System.Drawing.Font($heroFamily, 9)           # 多行模式行内速率（等宽右对齐可扫读）
 }
 # 色彩只编码状态：数字只有白/灰，彩色仅在表达状态时出现，同一时刻最多一种彩
 # 色在场（VISUAL.md 3.1）
@@ -925,9 +1369,10 @@ $script:Brushes = @{
   sub     = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(154, 161, 171))   # 单位/元信息/空闲主数字
   faint   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(92, 100, 112))    # 历史柱/次要元信息
   live    = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(52, 211, 153))    # 在飞状态点 + 最新柱
-  estim   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(229, 181, 103))   # 预留：v2 估算速率的 ≈ 前缀
+  estim   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(229, 181, 103))   # 估算速率的 ≈（v2 L3，DESIGN.md §6）
   error   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(229, 72, 77))     # 错误状态点与错误文案
   idleDot = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(74, 80, 88))      # 空闲状态点
+  rowHi   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(35, 40, 48))       # 多行模式在飞行高亮条（surface 提亮一档）
 }
 $script:Pens = @{
   track = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(38, 43, 50)), 1
@@ -1051,6 +1496,84 @@ function Draw-Right {
   $g.DrawString($text, $font, $brush, ($rightX - $w), $y)
 }
 
+function Draw-MultiRows {
+  # 多行并列（DESIGN.md §7.2）：头部 + 每活跃会话一行，在飞行置顶并带高亮条与计时，
+  # 空闲行单行；速率列右对齐（估算 ≈ 琥珀、在飞真值亮白、空闲真值灰、无数据 —）。
+  param($g)
+
+  $rows = @($script:OverlayRows)
+  $anyInFlight = $false
+  foreach ($r in $rows) { if ($r.inFlight) { $anyInFlight = $true } }
+  $hasError = [bool]$script:Stats.error
+
+  # ---- 头部：全局状态点 + 窗口名 + × ----
+  $dotBrush = $script:Brushes.idleDot
+  if ($hasError) { $dotBrush = $script:Brushes.error }
+  elseif ($anyInFlight) { $dotBrush = $script:Brushes.live }
+  $g.FillEllipse($dotBrush, (Px 12), (Px 9), (Px 7), (Px 7))
+  $g.DrawString($script:Str.header, $script:Fonts.stat, $script:Brushes.sub, (Px 26), (Px 5))
+  if ($script:Hovered) {
+    $g.DrawString('×', $script:Fonts.unit, $script:Brushes.sub, ($script:MultiW - (Px 20)), (Px 4))
+  }
+
+  # ---- 行区 ----
+  $y = [single]$script:MultiHeaderH
+  $i = 0
+  foreach ($r in $rows) {
+    $i++
+    $rowH = $script:RowHIdle
+    if ($r.inFlight) {
+      $rowH = $script:RowHActive
+      $g.FillRectangle($script:Brushes.rowHi, [single](Px 6), ($y - [single](Px 2)),
+        [single]($script:MultiW - (Px 12)), [single]($rowH - (Px 3)))
+    }
+    # 速率列（右对齐）：先定位，标题的可用宽度要让位给它
+    $rateText = '—'
+    $rateBrush = $script:Brushes.faint
+    if ($null -ne $r.estim) {
+      $rateText = '≈{0:N0}' -f [double]$r.estim
+      $rateBrush = $script:Brushes.estim
+    }
+    elseif ($null -ne $r.tps) {
+      $rateText = '{0:N1}' -f [double]$r.tps
+      if ($r.inFlight) { $rateBrush = $script:Brushes.ink }
+      else { $rateBrush = $script:Brushes.sub }
+    }
+    $rateSize = $g.MeasureString($rateText, $script:Fonts.rowNum)
+    $unitSize = $g.MeasureString($script:Str.unit, $script:Fonts.unit)
+    $unitRight = [single]$script:MultiW - (Px 12)
+    $rateRight = $unitRight - $unitSize.Width - (Px 2)
+    $g.DrawString($rateText, $script:Fonts.rowNum, $rateBrush, ($rateRight - $rateSize.Width), ($y + (Px 1)))
+    $g.DrawString($script:Str.unit, $script:Fonts.unit, $script:Brushes.faint, ($unitRight - $unitSize.Width), ($y + (Px 4)))
+
+    # 标题（截断加省略号；取不到标题时回退短码）
+    $title = [string]$r.title
+    if (-not $title) { $title = 'id ' + (Get-ShortSessionId -Sid $r.sid) }
+    $titleBrush = $script:Brushes.sub
+    if ($r.inFlight) { $titleBrush = $script:Brushes.ink }
+    $cap = ($rateRight - $rateSize.Width - (Px 8)) - (Px 30)
+    if ($cap -lt (Px 30)) { $cap = Px 30 }
+    while ($title.Length -gt 1 -and $g.MeasureString($title, $script:Fonts.rowTitle).Width -gt $cap) {
+      $title = $title.Substring(0, $title.Length - 1)
+    }
+    $g.DrawString($title, $script:Fonts.rowTitle, $titleBrush, (Px 30), ($y + (Px 2)))
+
+    # 在飞行第二行：计时 + 该会话累计输出
+    if ($r.inFlight) {
+      $e = 0.0
+      if ($r.elapsed) { $e = [double]$r.elapsed }
+      $g.DrawString(($script:Str.elapsedFmt -f $e), $script:Fonts.stat, $script:Brushes.sub, (Px 30), ($y + (Px 18)))
+      Draw-Right -g $g -text ($script:Str.totalFmt -f [long]$r.out) -font $script:Fonts.stat `
+        -brush $script:Brushes.faint -rightX ($script:MultiW - (Px 12)) -y ($y + (Px 18))
+    }
+    $y += $rowH
+  }
+
+  if ($script:MoreRows -gt 0) {
+    $g.DrawString(($script:Str.moreFmt -f $script:MoreRows), $script:Fonts.stat, $script:Brushes.faint, (Px 30), ($y + (Px 2)))
+  }
+}
+
 $form.Add_Paint({
     param($sender, $e)
     $g = $e.Graphics
@@ -1064,21 +1587,23 @@ $form.Add_Paint({
       $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
     }
 
+    # ---- 多行模式：并列展示活跃会话（DESIGN.md §7.2），单卡逻辑不参与 ----
+    if ($script:MultiMode) {
+      Draw-MultiRows -g $g
+      return
+    }
+
     # ---- 状态判定 ----
     # 在飞：日志里有 started 未配对 completed 的请求（L1）。rollout 的 lastAt 只在
     # 请求结束时更新，长请求期间靠它判断「在不在跑」会在 2.5s 后误判为空闲。
     $inFlight = $false
     $elapsedSec = 0.0
-    if ($script:ReqStart) {
-      $elapsedSec = ([DateTime]::UtcNow - $script:ReqStart.utc).TotalSeconds
-      if ($elapsedSec -gt 600) {
-        # 兜底：completed 事件丢了（回看窗口截断/日志轮转）时不能永远转下去
-        $script:ReqStart = $null
-      }
-      elseif (-not $script:ReqStart.sid -or -not $script:Stats.sessionId -or
-        $script:ReqStart.sid -eq $script:Stats.sessionId) {
-        $inFlight = $true
-      }
+    $elapsedSec = Get-InFlightElapsed -SessionId $script:Stats.sessionId
+    if ($null -ne $elapsedSec -and $elapsedSec -le 600) {
+      $inFlight = $true
+    }
+    else {
+      $elapsedSec = 0.0   # 超时条目 Update-Estimates 已清，这里只防渲染残留
     }
     $recent = $false
     if ($script:Stats.lastAtUtc) {
@@ -1099,6 +1624,15 @@ $form.Add_Paint({
     if ($live -and -not $hasError) { $numBrush = $script:Brushes.ink }
     $txt = '—'
     if ($hasData -and -not $hasError) { $txt = '{0:N1}' -f $script:Stats.lastTps }
+    # 在飞且估算在场（L3，DESIGN.md §6）：主数字让位给 ≈估算（琥珀色），
+    # 真值在请求结束落盘后回落覆盖。窗口内落库不足 2 次时估算为空，只留计时。
+    if ($inFlight -and -not $hasError) {
+      $estimMain = Get-EstimTps -SessionId $script:Stats.sessionId
+      if ($null -ne $estimMain) {
+        $txt = '≈{0:N0}' -f $estimMain
+        $numBrush = $script:Brushes.estim
+      }
+    }
     $numX = Px 26; $numY = Px 0
     $g.DrawString($txt, $script:Fonts.hero, $numBrush, $numX, $numY)
     $numSize = $g.MeasureString($txt, $script:Fonts.hero)
@@ -1232,7 +1766,9 @@ $form.Add_MouseUp({
     $script:Drag = $false
     $script:DragMoved = $false
     if ($wasDrag) { Save-Pos; return }
-    if ($e.X -ge ($W - (Px 34)) -and $e.Y -le (Px 28)) { $form.Close() }
+    # 命中区按当前窗口宽度算：多行模式下宽度与 × 的位置都变了
+    $curW = $form.ClientSize.Width
+    if ($e.X -ge ($curW - (Px 34)) -and $e.Y -le (Px 28)) { $form.Close() }
   })
 
 # 关闭钮平时不画（chrome 为零），悬停时才出现；命中区不变
@@ -1292,6 +1828,9 @@ $timer.Add_Tick({
     }
     if (($script:TickCount % 5) -eq 0) { Assert-TopMost }
     Update-Stats
+    # 单卡 ↔ 多行切换（行数据刚在 Update-Stats 里组装好；≥2 行并列，单行退回紧凑卡片）
+    $visRows = @($script:OverlayRows).Count + $(if ($script:MoreRows -gt 0) { 1 } else { 0 })
+    Update-OverlayShape -Multi:($visRows -ge 2) -VisualRows $visRows
     Write-Status
     $form.Invalidate()
   })
