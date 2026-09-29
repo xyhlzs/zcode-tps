@@ -95,10 +95,13 @@
 
 ### L5 打包与分发
 
-1. **真实 marketplace**：仓库根的 `marketplace.json` 目前是本地测试用
-   （`name: dev-zcode-tps-local`，source 指相对目录）。发布 = 把仓库推到 GitHub，
-   marketplace.json 补上仓库地址后，其他用户「添加 marketplace → 安装」两步完成。
-   版本号随每次变更递增，changelog 记在 RELEASES 或 README。
+1. **真实 marketplace**：仓库根的 `marketplace.json`（`name: zcode-tps`，source 指
+   相对目录 `./zcode-tps`）已按发布形态写好——ZCode 支持从 GitHub 仓库添加市场
+   （zcode-guide 的 configuration-guide 明确列出 GitHub repo / Git URL / 本地目录 /
+   文件四种来源），所以发布 = 把仓库推到 GitHub，其他用户「添加市场 → 安装」两步完成。
+   `marketplace.json` 的 `version` 决定用户看到的版本，两处版本号必须一致（CI 校验）。
+   changelog 记在本仓 `CHANGELOG.md`。
+   **市场名发布后不要再改**：改名等于换了一个市场，已安装用户需要重新添加。
 2. **编码红线**：所有 .ps1 必须保持 **UTF-8 with BOM**（PS 5.1 无 BOM 时中文注释
    和字符串会按 ANSI 解析，直接乱码）。 marketplace 打包走 zip 时字节原样保留，
    但任何「在网页上复制脚本」的安装方式都会坏——README 明确只支持 marketplace 安装。

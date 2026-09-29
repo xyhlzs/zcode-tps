@@ -124,6 +124,6 @@ git push -u origin main
   `![CI](https://github.com/<owner>/zcode-tps/actions/workflows/ci.yml/badge.svg)`
 - `.github/ISSUE_TEMPLATE/bug_report.yml` 里的排查指引改成指向本仓库 README。
 
-`marketplace.json` 的 `name` 目前是 `dev-zcode-tps-local`（本地测试用）。发布时改成
-面向用户的名称（例如 `zcode-tps`），否则用户的市场里会出现一个名字叫「本地测试」的市场。
-改名会让已安装的用户需要重新添加市场，所以发布前一次改到位。
+`marketplace.json` 的 `name` 是 `zcode-tps`（与仓库名和插件名一致），用户添加市场后
+在市场列表里看到的就是它。**发布后不要再改**：改名等于换了一个市场，已安装的用户
+需要重新添加。如果以后这个仓库要托管多个插件，再考虑换成更宽泛的名字。

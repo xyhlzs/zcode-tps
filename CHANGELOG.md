@@ -10,6 +10,13 @@
 
 ## [Unreleased]
 
+（下一个版本的在制品放这里。）
+
+## [0.2.0] — 2026-09-29
+
+**首个公开发布版本。** 可迁移性（PORTABILITY.md）五个层次全部落地，目标从「我本机能跑」
+变成「别人下载即用」。P1 场景在每步后都保持通过。
+
 ### Added
 
 - **会话标题显示**：小窗元信息首行右列优先显示当前会话的人能读懂的标题
@@ -21,15 +28,8 @@
 
 - 仓库工程化：`.gitattributes`（LF 统一 + `.ps1` 字节原样以保住 UTF-8 BOM）、
   `.gitignore`、`LICENSE`（MIT）、根 `README.md`、本文件、`CONTRIBUTING.md`、
-  GitHub Actions CI（清单 JSON 校验 + `.ps1` BOM 守卫 + 跟随回归测试）、
-  issue / PR 模板。
-
-## [0.2.0] — 2026-09-29
-
-可迁移性（PORTABILITY.md）五个层次全部落地，目标从「我本机能跑」变成「别人下载即用」。
-本版未改变默认行为，P1 场景在每步后都保持通过。
-
-### Added
+  GitHub Actions CI（清单 JSON 校验 + 版本号一致性 + `.ps1` BOM 守卫 +
+  sidecar 语法检查 + 跟随回归测试）、issue / PR 模板、README 截图生成工具。
 
 - **L1 环境守门**：`SessionStart` hook 在非 Windows 上静默 `exit 0`（hook 报错会打扰
   每个会话启动）；监控启动时探测 PowerShell 受限语言模式（CLM），受限时照常运行但在

@@ -155,7 +155,7 @@ UI 无障碍树（§12 的开放问题）。
    D:\dev\zcode-tps
    ```
 
-2. 到 **个人 → ZCode TPS 监控（本地市场名 `dev-zcode-tps-local`）→ 安装**。
+2. 到 **个人 → ZCode TPS 监控（市场名 `zcode-tps`）→ 安装**。
 3. 新开一个任务，小窗会随 `SessionStart` 自动出现。
 
 ## 手动运行与自检

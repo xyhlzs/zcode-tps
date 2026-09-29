@@ -1,5 +1,5 @@
 {
-  "name": "dev-zcode-tps-local",
+  "name": "zcode-tps",
   "plugins": [
     {
       "name": "zcode-tps",
