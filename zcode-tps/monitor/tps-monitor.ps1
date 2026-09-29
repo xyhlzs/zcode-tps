@@ -266,8 +266,12 @@ $script:Calib = @{
   text      = @{ samples = @() }
 }
 $script:CalibMaxSamples = 8     # 只用最近 N 次配对，模型/语言变化后旧标定自动淡出
-$script:CalibBase = @{}         # sessionId → @{ b0r; b0x; msgId }，请求开始时的字节基线
-$script:CalibDefaultK = 0.25    # 无标定数据时的粗估（tok/byte，中文/JSON 混合量级），会被真值修正
+$script:CalibBase = @{}         # sessionId → @{ b0r; b0x; msgId; utc }，请求开始时的计数基线
+# 计数口径：sidecar 的 part 计数是 UTF-16 码元数（与 SQLite length(text) 同基准），
+# 不是 UTF-8 字节。k 的标定与使用都在这个口径上，单位自洽；默认值按「中文/英文
+# 混合、JSON 转义膨胀」粗估（中文 1 码元 ≈ 0.5-0.8 tok，英文 ≈ 0.25），首次请求
+# 完成后即被真值修正。
+$script:CalibDefaultK = 0.35    # 无标定数据时的粗估（tok/码元）
 
 $script:Drag = $false
 $script:DragMoved = $false
@@ -713,6 +717,17 @@ function Parse-Record {
   $m = [regex]::Match($head, '"modelId"\s*:\s*"([^"]*)"')
   if ($m.Success) { $model = $m.Groups[1].Value }
 
+  # completedAt 在行首（与 durationMs 同排），用来区分「刚完成的请求」和
+  # 「启动回看读到的历史记录」——只有前者参与 L3 标定
+  $completedAt = $null
+  $m = [regex]::Match($head, '"completedAt"\s*:\s*"([^"]+)"')
+  if ($m.Success) {
+    try {
+      $completedAt = [DateTimeOffset]::Parse(
+        $m.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+    } catch { }
+  }
+
   return [ordered]@{
     durationMs      = $dur
     outputTokens    = $outTokens
@@ -720,6 +735,7 @@ function Parse-Record {
     sessionId       = $sid
     turnId          = $tid
     model           = $model
+    completedAt     = $completedAt
   }
 }
 
@@ -919,9 +935,12 @@ function Invoke-RecordCalib {
   # 只在主 Stats 路径调用：并发行各自的 tail 不标定，避免同一请求重复配对。
   $sid = $script:Stats.sessionId
   if (-not $sid) { return }
+  # 只认刚完成的请求：启动回看会读到历史记录，它们的字节早就与基线对不上，
+  # 若让它们消费基线，真实的在飞请求完成时反而无基线可配
+  if ($null -eq $r.completedAt -or
+    ([DateTime]::UtcNow - $r.completedAt).TotalSeconds -gt 30) { return }
   $base = $script:CalibBase[$sid]
   if (-not $base -or $base.b0r -lt 0) { return }
-  $script:CalibBase.Remove($sid)
   $cur = $null
   foreach ($ss in $script:SidecarSessions) { if ($ss.id -eq $sid) { $cur = $ss; break } }
   if (-not $cur -or -not $cur.parts) { return }
@@ -929,15 +948,21 @@ function Invoke-RecordCalib {
   if ([string]$cur.msgId -ne [string]$base.msgId) { return }
   $dR = [long]$cur.parts.reasoning - [long]$base.b0r
   $dX = [long]$cur.parts.text - [long]$base.b0x
-  # 小样本噪声大：增量字节低于阈值不标定
+  # 小样本噪声大：增量计数低于阈值不标定。基线只在真正配对成功后才消费——
+  # 启动回读的历史记录（字节与基线无增量）不构成有效配对，不能把基线吃掉，
+  # 否则真实的在飞请求完成时反而无基线可配（600s 兜底清理防残留）。
+  $added = $false
   if ($dR -ge 300) {
     Add-CalibSample -Type 'reasoning' -Tok ([double]$r.reasoningTokens) -Bytes ([double]$dR)
+    $added = $true
   }
   if ($dX -ge 300) {
     # outputTokens 含工具调用 token 而 tool part 不参与换算，text 类系数会略偏高；
     # A4（±20%）门槛下可接受，DESIGN.md §12 已记录
     Add-CalibSample -Type 'text' -Tok ([double]($r.outputTokens - $r.reasoningTokens)) -Bytes ([double]$dX)
+    $added = $true
   }
+  if ($added) { $script:CalibBase.Remove($sid) }
 }
 
 # ------------------------------------------------------------------ 多会话并列数据层（DESIGN.md §7.2/§7.3）

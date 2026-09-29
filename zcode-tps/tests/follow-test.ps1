@@ -91,7 +91,8 @@ function Add-Rollout {
 
 function Get-Status {
   if (-not (Test-Path -LiteralPath $StatusFile)) { return $null }
-  try { return (Get-Content -LiteralPath $StatusFile -Raw | ConvertFrom-Json) } catch { return $null }
+  # status.json 是无 BOM 的 UTF-8：PS 5.1 不带 -Encoding 时按系统 ANSI 读
+  try { return (Get-Content -LiteralPath $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
 }
 
 function Wait-Status {

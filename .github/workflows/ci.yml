@@ -49,6 +49,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host 'OK  tps-sidecar.mjs'
 
+      - name: sidecar 数据契约测试（合成库 + 真实子进程）
+        shell: bash
+        run: node zcode-tps/tests/sidecar-test.mjs
+
+      - name: L3 估算与多会话并列数据层测试
+        shell: pwsh
+        run: ./zcode-tps/tests/estim-test.ps1
+
       - name: 会话跟随回归测试
         shell: pwsh
         run: ./zcode-tps/tests/follow-test.ps1
