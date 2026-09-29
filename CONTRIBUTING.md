@@ -109,24 +109,23 @@ feat(ui): 按 VISUAL.md 重设计小窗
 
 ## 首次发布到 GitHub
 
-仓库目前只有本地 `main` 分支、没有 remote。要对外发布：
+仓库地址是 <https://github.com/xyhlzs/zcode-tps>，本地分支 `main`（已从 `master` 改名，
+与 GitHub 默认分支名对齐）。
 
 ```bash
-git remote add origin git@github.com:<owner>/zcode-tps.git
+git remote add origin https://github.com/xyhlzs/zcode-tps.git
 git push -u origin main
 ```
 
-（本地分支已从 `master` 改名为 `main`，与 GitHub 默认分支名对齐。）
-
 推送后别人「添加市场」时粘贴的就是仓库地址。ZCode 把它记在
 `~/.zcode/cli/config.json` 的 `plugins.extraKnownMarketplaces` 下，GitHub 来源的形态是
-`{"source": {"source": "github", "repo": "<owner>/<repo>"}}`——发布后可以拿它核对市场
+`{"source": {"source": "github", "repo": "xyhlzs/zcode-tps"}}`——发布后可以拿它核对市场
 有没有被正确识别。
 
 推送后补两处，它们都需要仓库的真实地址：
 
 - 根 `README.md` 顶部加 CI 徽章：
-  `![CI](https://github.com/<owner>/zcode-tps/actions/workflows/ci.yml/badge.svg)`
+  `![CI](https://github.com/xyhlzs/zcode-tps/actions/workflows/ci.yml/badge.svg)`
 - `.github/ISSUE_TEMPLATE/bug_report.yml` 里的排查指引改成指向本仓库 README。
 
 `marketplace.json` 的 `name` 是 `zcode-tps`（与仓库名和插件名一致），用户添加市场后

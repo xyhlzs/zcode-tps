@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        提交前请先看仓库 README 的「排查」章节，那里覆盖了「没看到窗口 / 被别的窗口盖住」
-        「数字发虚」「控制台一闪而过」几个常见情况。
+        提交前请先看 [README 的「排查」章节](https://github.com/xyhlzs/zcode-tps/blob/main/zcode-tps/README.md#排查)，
+        那里覆盖了「没看到窗口 / 被别的窗口盖住」「数字发虚」「控制台一闪而过」几个常见情况。
 
   - type: textarea
     id: what

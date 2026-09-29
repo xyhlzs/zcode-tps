@@ -1,5 +1,9 @@
 # ZCode TPS Monitor
 
+[![CI](https://github.com/xyhlzs/zcode-tps/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xyhlzs/zcode-tps/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](#环境与兼容性)
+
 在 ZCode 界面**之外**开一个置顶小窗，实时显示模型生成速率（tok/s），并跟随你当前
 所在的会话。
 
