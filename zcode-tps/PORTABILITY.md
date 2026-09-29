@@ -25,6 +25,7 @@
 | 字体 | Segoe UI + 中文回退雅黑（系统自带）、Cascadia → Consolas 回退链已实现 | 无需处理 |
 | DPI / 多屏 | PER_MONITOR_AWARE_V2 + Px() 缩放已实现 | 无需处理 |
 | 数字格式 | `{0:N1}` 等用当前文化 | 各 locale 显示各自的小数/分组符，**是正确行为**，但解析 status.json 的工具要注意（旁路产物，可不管） |
+| **node 运行时** | 会话标题靠 `monitor/tps-sidecar.mjs`（内置 `node:sqlite`，**需 ≥ 22.5**）只读轮询 `db.sqlite` | 没有 node、版本过低（无 `node:sqlite`）、或表结构变更时，标题取不到 → 元信息首行右列退回显示请求数。**不影响速率**：2026-09-29 实测把 node 从 PATH 移除后跑监控，进程存活、速率照常（60 tok/s）、`status.json` 的 `sidecar` 为 `dead`。README 把 node 标为「可选」并写明退回行为 |
 
 ### 1.2 安装与生命周期类
 

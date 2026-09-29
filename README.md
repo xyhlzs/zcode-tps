@@ -54,7 +54,7 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 | 左上圆点 | 绿色 = 正在生成或 2.5 秒内有新数据；红色 = 出错；灰色 = 空闲 |
 | 右上角 | 生成中显示本次请求已进行的秒数；空闲/等待时显示当前会话 id 前 8 位 |
 | 迷你柱状图 | 最近 40 次请求的速率，最右一根是当前值 |
-| 元信息三行 | 模型名、本轮 turn 输出 token、会话累计输出 token、已统计请求数、平均速率、单次最高速率 |
+| 元信息三行 | 左列：模型名、本轮 turn 输出 token、会话累计输出 token；右列：会话标题（取不到时退回已统计请求数）、平均速率、单次最高速率 |
 
 窗口可拖动并记忆位置，默认 85% 不透明度（`-Opacity` 可调 0.3–1.0），鼠标悬停时右上角
 淡入关闭钮。小窗跟随 ZCode 主窗口：ZCode 最小化时一并收起、恢复时弹回原位；ZCode 切到
@@ -92,9 +92,16 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 |---|---|
 | 操作系统 | Windows 10 及以上（macOS / Linux 不支持） |
 | PowerShell | 5.1 及以上（系统自带）；脚本全部为 UTF-8 with BOM |
+| Node.js（可选） | **≥ 22.5**（需要内置的 `node:sqlite`），用来显示会话标题。没有 Node 也完全能用：元信息首行右列退回显示已统计请求数，速率等其余功能不受影响 |
 | ZCode | 3.14.3.7762 上实测通过（见 [PORTABILITY.md § 3 验收矩阵](zcode-tps/PORTABILITY.md#3-验收矩阵)） |
 | DPI | 100% / 200% 实测；按 `DpiX / 96` 缩放并做 PER_MONITOR_AWARE_V2 |
 | 受限语言模式（CLM） | 自动降级并标注「精简模式（系统策略限制）」；**未在真 CLM 环境验证过** |
+
+会话标题来自 ZCode 的 `db.sqlite`（`session` 表的 `title` 列），而 PowerShell 5.1 没有
+SQLite provider，所以标题由一个独立的 Node 子进程（`monitor/tps-sidecar.mjs`）只读轮询、
+经交换文件递给监控。它每 250ms 刷新一次，父进程消失即自杀；连续取不到新鲜快照就自动
+放弃并退回短码。当前状态可在 `status.json` 的 `sidecar` 字段看到（`ok` / `dead` / `off`，
+`off` 表示无头自检模式）。
 
 数据源是两个 ZCode 内部文件，**没有官方 API 保证**，ZCode 升级后字段可能变。脚本对此
 做了优雅降级（界面显示「已读 N 行，0 条可识别」而不是崩溃），但功能可能失效——详见

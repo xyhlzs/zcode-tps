@@ -41,6 +41,14 @@ jobs:
         shell: pwsh
         run: ./tools/check-bom.ps1
 
+      - name: 标题 sidecar 语法可解析
+        shell: pwsh
+        run: |
+          # 跟随回归测试跑在 -Headless 下，不启动 sidecar，所以这里单独守一道语法。
+          node --check zcode-tps/monitor/tps-sidecar.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host 'OK  tps-sidecar.mjs'
+
       - name: 会话跟随回归测试
         shell: pwsh
         run: ./zcode-tps/tests/follow-test.ps1

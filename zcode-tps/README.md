@@ -17,7 +17,8 @@ opacity, ZCode data home, window matching). Stop with `/tps stop`; uninstalling 
 plugin stops and cleans up the watcher automatically.
 
 环境要求：Windows 10 及以上、Windows PowerShell 5.1+（系统自带）；macOS/Linux 不支持。
-ZCode 侧在 3.14.3.7762 上实测通过（数据源是内部文件，没有官方 API 保证，见
+**可选** Node.js ≥ 22.5：用来显示会话标题，没有 Node 也能用（元信息首行右列退回显示
+请求数）。ZCode 侧在 3.14.3.7762 上实测通过（数据源是内部文件，没有官方 API 保证，见
 [数据来源与已知限制](#数据来源与已知限制)）。企业策略的受限语言模式（CLM）下功能自动
 降级，小窗会标注「精简模式（系统策略限制）」。
 
@@ -40,7 +41,7 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 | 左上圆点 | 绿色 = 正在生成（日志有 started 未配对 completed 的请求）或 2.5 秒内有新数据；红色 = 出错；灰色 = 空闲 |
 | 右上角 | 生成中显示本次请求已进行的秒数（计时来源是日志 `model.request.started`，≤1s 刷新）；空闲/等待时显示 `id xxxxxxxx`（当前会话 id 前 8 位） |
 | 迷你柱状图 | 最近 40 次请求的速率，历史柱灰色，最右一根是当前值（在飞时绿色）；纵轴带迟滞，刷出新高不会整图重缩放 |
-| 元信息三行 | 左列：模型名（超长截断）、本轮 turn 输出 token、会话累计输出 token；右列：已统计请求数、平均速率（Σ outputTokens ÷ Σ durationMs）、单次请求最高速率 |
+| 元信息三行 | 左列：模型名（超长截断）、本轮 turn 输出 token、会话累计输出 token；右列：会话标题（取不到时退回已统计请求数）、平均速率（Σ outputTokens ÷ Σ durationMs）、单次请求最高速率 |
 | 状态文案 | 归属切到无数据会话时显示「该会话暂无生成数据」；出错时显示红色错误信息 |
 
 窗口可拖动（拖完位置记在 `%LOCALAPPDATA%\ZCodeTpsMonitor\pos.txt`）。
@@ -120,12 +121,18 @@ UI 无障碍树（§12 的开放问题）。
 
 ## 数据来源与已知限制
 
-两个内部文件，都**没有官方 API 保证**，ZCode 升级后字段可能变：
+三个内部文件，都**没有官方 API 保证**，ZCode 升级后字段可能变：
 
 - `~/.zcode/cli/rollout/model-io-<sessionId>.jsonl` —— 每次模型请求一行，
   含 `durationMs` 与 `response.usage.outputTokens`，是速率的唯一真实来源。
   （日志里的同一组数字已经被他们写成 `[Redacted]` 了。）
 - `~/.zcode/cli/log/zcode-YYYY-MM-DD.jsonl` —— 只用来判断当前会话。
+- `~/.zcode/cli/db/db.sqlite` 的 `session` 表 —— 只用来取会话标题。PowerShell 5.1
+  没有 SQLite provider，所以标题由一个独立的 Node 子进程
+  （`monitor/tps-sidecar.mjs`，用内置 `node:sqlite`）每 250ms 只读轮询、经交换文件
+  `sidecar.json` 递给监控。监控自己不碰 sqlite。没有 Node、连续 3 轮取不到新鲜快照、
+  或表结构变更时自动放弃，退回显示会话 id 前 8 位——**这条路已实测**（把 node 从
+  PATH 移除后跑监控：进程存活、速率照常、`status.json` 的 `sidecar` 为 `dead`）。
 
 由此带来三个限制：
 
