@@ -102,7 +102,15 @@
    和字符串会按 ANSI 解析，直接乱码）。 marketplace 打包走 zip 时字节原样保留，
    但任何「在网页上复制脚本」的安装方式都会坏——README 明确只支持 marketplace 安装。
 3. **双语 README**：顶部加英文 Quickstart（安装两步 + 截图），正文维持中文。
-4. plugin.json 补 `keywords` / `license` 字段（用 plugin-creator 核对可用字段名）。
+   截图由 `tools/capture-overlay.ps1` 用合成数据生成（`-Opacity 1` + PrintWindow
+   按窗口句柄抓取，不抓桌面，所以不会带进宿主窗口内容）。
+4. **清单字段**：`plugin.json` / `marketplace.json` 的官方规范（plugin-creator 的
+   plugin-json-spec.md）只定义了 `name` / `version` / `description` / `author` /
+   `skills` / `commands` / `hooks` / `mcpServers`，以及市场条目的
+   `displayName` / `displayName_i18n` / `description_i18n` / `category`。
+   **没有 `license` / `keywords` / `repository` 字段**，本机也没有 zcode CLI 可以
+   验证未知字段是否被接受。因此没有往清单里塞这些字段——许可证放在仓库根的
+   `LICENSE`（MIT），由 GitHub 识别；宁缺勿滥，避免未知字段让清单校验失败。
 
 ---
 
@@ -121,6 +129,7 @@
 | P7 | ZCode 窗口标题/进程名与预期不符（config 改写后） | 跟随恢复 | ✅ 错标题 → `zcodeWin=none`（不跟随不误关）；正确标题 → 正常跟随 |
 | P8 | 无 ZCode 裸跑监控 | 不误退出、不误关（现有行为回归） | ✅ 同 P7 错标题场景（从未找到窗口时不动作） |
 | P9 | 脚本被下载后带 MOTW | 可运行（Bypass） | ✅ 带 Zone.Identifier 的副本正常跑完自检 |
+| P10 | 仓库工程化：清单可解析、版本号两处一致、`.ps1` 带 BOM | CI 全绿 | ✅ 规则已落到 `.github/workflows/ci.yml`；本机 `tools\check-bom.ps1` 与回归测试均通过 |
 
 ---
 
@@ -132,7 +141,13 @@
 4. 毒丸与 stop.flag（L4-1），`-NoWatchdog` 开关。
 5. `/tps` command（L4-2，manifest 字段先经 plugin-creator 核对）。
 6. README 双语 quickstart + 环境声明 + ZCode 版本适配记录（L5）。
-7. marketplace.json 发布化（L5，配合仓库公开）。
+7. marketplace.json 发布化（L5，配合仓库公开）——**未做**：需要仓库的真实 GitHub
+   地址，见 CONTRIBUTING.md 的「首次发布到 GitHub」。
+8. 仓库工程化（在 L1–L5 之外补的一层，让仓库本身可协作）：
+   `.gitattributes`（LF 统一 + `*.ps1 -text` 保住 BOM）、`.gitignore`、`LICENSE`、
+   根 `README.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`.editorconfig`、
+   `.github/workflows/ci.yml`、issue / PR 模板、`tools/capture-overlay.ps1`
+   （README 截图）、`tools/check-bom.ps1`（BOM 守卫）。
 
 每步独立可回退；1–4 不改任何现有默认行为，P1 场景在每步后必须保持通过。
 
@@ -146,4 +161,6 @@
 | en 文案在 8pt 下的宽度与 zh 不同 | 已实测：en 冒烟截图无重叠（最长串 `No generation data in this session yet` 在元信息行宽内） |
 | CLM 下的探测本身可用性 | `LanguageMode` 读取在 CLM 下允许；若连检测都失败按「受限」处理 |
 | **CLM 降级深度被低估**：§2 L1 假设「纯 .NET 调用大多可用」，但真 CLM 的类型白名单可能连 `FileStream`/`Mutex` 都拦，降级会比设计更深（数据管线也可能失效） | P4 本机无法模拟（见验收矩阵）。若真机验证发现数据管线失效，精简模式的含义要扩大，届时重新评估 |
-| 测试脚本自身踩了 BOM 坑（无 BOM 的 .ps1 含中文在 PS5.1 下乱码断串，2026-09-29 实测撞上） | 插件自带的 .ps1 全部已带 BOM（已核对）；给仓库外发脚本时保持 BOM 是硬约束 |
+| 测试脚本自身踩了 BOM 坑（无 BOM 的 .ps1 含中文在 PS5.1 下乱码断串，2026-09-29 实测撞上） | 插件自带的 .ps1 全部已带 BOM（已核对）；`.gitattributes` 的 `*.ps1 -text` + `tools\check-bom.ps1` + CI 三重守卫，给仓库外发脚本时保持 BOM 是硬约束 |
+| 仓库尚无 GitHub remote，README 徽章、issue 模板里的链接、`marketplace.json` 的市场名都还指向本地形态 | 已在 CONTRIBUTING.md 写清「首次发布到 GitHub」清单（改分支名、加 remote、补徽章、改市场名）；发布前一次改到位 |
+| 清单的 `license` / `keywords` / `repository` 字段无官方规范可依，本机也无 zcode CLI 可验证未知字段是否被接受 | 不塞未知字段（见 §2 L5.4）；许可证只放仓库根 `LICENSE`，待能验证后再补清单字段 |

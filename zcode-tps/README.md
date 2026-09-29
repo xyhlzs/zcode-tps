@@ -3,6 +3,12 @@
 在 ZCode 界面**之外**开一个置顶小窗，实时显示模型生成速率（tok/s），并跟随你当前
 所在的会话。
 
+<p align="center">
+  <img src="../docs/images/overlay-zh.png" alt="TPS 小窗（中文）" width="324">
+  &nbsp;&nbsp;
+  <img src="../docs/images/overlay-en.png" alt="TPS overlay (English)" width="324">
+</p>
+
 **English quickstart** — Windows 10+ only. Add this repo as a plugin marketplace
 (**Plugin Marketplace → Add → Add Plugin Marketplace**), install *ZCode TPS Monitor*,
 then start any task: the overlay appears automatically. Configure via
@@ -11,7 +17,12 @@ opacity, ZCode data home, window matching). Stop with `/tps stop`; uninstalling 
 plugin stops and cleans up the watcher automatically.
 
 环境要求：Windows 10 及以上、Windows PowerShell 5.1+（系统自带）；macOS/Linux 不支持。
-企业策略的受限语言模式（CLM）下功能自动降级，小窗会标注「精简模式（系统策略限制）」。
+ZCode 侧在 3.14.3.7762 上实测通过（数据源是内部文件，没有官方 API 保证，见
+[数据来源与已知限制](#数据来源与已知限制)）。企业策略的受限语言模式（CLM）下功能自动
+降级，小窗会标注「精简模式（系统策略限制）」。
+
+本文件是插件的完整用户手册。仓库级的安装入口、文档索引与开发说明见
+[../README.md](../README.md) 和 [../CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ZCode 插件系统没有 UI 扩展点（插件只能贡献 skills / commands / hooks / MCP / agents，
 manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录但不执行」），
@@ -221,3 +232,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 - **控制台一闪而过**：启动器把 `-WindowStyle Hidden` 传给 `powershell.exe` 自己，
   只隐藏控制台。如果默认终端宿主是 Windows Terminal，它可能忽略这个开关而闪一下，
   不影响功能。
+
+---
+
+[MIT](../LICENSE) © 2026 xyhlzs
+
