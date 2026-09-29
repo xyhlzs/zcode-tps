@@ -67,11 +67,12 @@ function Find-TpsWindow {
 }
 
 # PrintWindow 会把窗口 Region 之外（四个圆角）的像素画成不透明黑。把圆角外的像素
-# 置为全透明，README 在浅色主题下才不会出现四个黑角。半径从截图像素宽度反推，
-# 不写死数字：小窗圆角是 Px 6，Px 按 DpiX/96 缩放，所以 432px 宽的截图半径是 12。
+# 置为全透明，README 在浅色主题下才不会出现四个黑角。半径 = 6 逻辑 px × DPI 缩放
+#（小窗圆角是 Px 6），从截图进程实测的 DPI 传入，不与窗口宽度耦合——多行模式
+# 的窗口比单卡宽。
 function Set-RoundedAlpha {
-  param([System.Drawing.Bitmap]$Bitmap)
-  $rad = 6.0 * ($Bitmap.Width / 216.0)
+  param([System.Drawing.Bitmap]$Bitmap, [double]$Scale = 1.0)
+  $rad = 6.0 * $Scale
   $w = $Bitmap.Width
   $h = $Bitmap.Height
   $r = [int][Math]::Ceiling($rad)
@@ -146,6 +147,8 @@ $logLines.Add('{"timestamp":"' + [DateTime]::UtcNow.AddSeconds(-4.5).ToString('o
 #      截图里不会出现你真实的会话标题；
 #   2. 截图能落在「元信息首行右列显示会话标题」的样子，而不是无 node 时的 req 计数兜底。
 # 没有 node 时跳过：标题取不到，截图自动退回 req 计数，工具仍然可用。
+# 表结构必须与 tps-sidecar.mjs 的查询匹配：session 需带 task_type 列（活跃集合
+# 用它排除子代理），message/part 两张表供给多行模式与在飞估算的字节数。
 $ZHome = Join-Path $Root 'zcode'
 $DbDir = Join-Path $ZHome 'db'
 [void](New-Item -ItemType Directory -Path $DbDir -Force)
@@ -156,14 +159,33 @@ try {
   $node = Get-Command node -ErrorAction SilentlyContinue
   if ($node) {
     $mk = @"
-const { DatabaseSync } = require('node:sqlite');
-const db = new DatabaseSync(process.argv[1]);
-db.exec('CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, time_updated INTEGER)');
-const ins = db.prepare('INSERT INTO session (id, title, time_updated) VALUES (?, ?, ?)');
-ins.run(process.argv[2], process.argv[3], Date.now());
-ins.run('sess_00000000-0000-4000-8000-000000000001', '另一条演示会话', Date.now() - 600000);
+import { DatabaseSync } from 'node:sqlite';
+const db = new DatabaseSync(process.argv[2]);
+// exec 只接受一个 SQL 字符串：多语句拼在一起，别拆成多个参数（拆了只有第一条生效）
+db.exec([
+  'CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, time_updated INTEGER, task_type TEXT NOT NULL DEFAULT \'interactive\');',
+  'CREATE INDEX session_task_type_idx ON session(task_type);',
+  'CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);',
+  'CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);',
+  'CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL, sequence INTEGER);',
+  'CREATE INDEX part_message_id_id_idx ON part(message_id, id);'
+].join(''));
+const ins = db.prepare('INSERT INTO session (id, title, time_updated, task_type) VALUES (?, ?, ?, ?)');
+ins.run(process.argv[3], process.argv[4], Date.now(), 'interactive');
+ins.run('sess_00000000-0000-4000-8000-000000000001', '另一条演示会话', Date.now() - 600000, 'interactive');
+// 主会话的 message + parts：动态字节任务的 UPDATE 目标，估算（≈）的数据来源
+const insMsg = db.prepare('INSERT INTO message (id, session_id, time_created, data, sequence) VALUES (?, ?, ?, ?, ?)');
+insMsg.run('msg_live', process.argv[3], Date.now(), JSON.stringify({ role: 'assistant', time: { created: Date.now() } }), 9);
+const insPart = db.prepare('INSERT INTO part (id, message_id, session_id, data, sequence) VALUES (?, ?, ?, ?, ?)');
+insPart.run('p_live_1', 'msg_live', process.argv[3],
+  '{"type":"reasoning","text":"' + '正在分析'.repeat(30) + '"}', 0);
+insPart.run('p_live_2', 'msg_live', process.argv[3], '{"type":"text","text":"' + '结论：'.repeat(40) + '"}', 1);
+console.log('DB OK');
 "@
-    & node -e $mk $DbPath $Sid $DemoTitle 2>&1 | Out-Null
+    # 写成临时 .mjs 再执行：node -e 传含 JSON 双引号的脚本会被 PS 5.1 的引号转义弄坏
+    $mkPath = Join-Path $Root 'mk.mjs'
+    [System.IO.File]::WriteAllText($mkPath, $mk, $NoBom)
+    & node $mkPath $DbPath $Sid $DemoTitle 2>&1 | Out-Null
     $nodeOk = (Test-Path -LiteralPath $DbPath)
   }
 }
@@ -223,9 +245,9 @@ function Save-Shot {
         $g.CopyFromScreen($r.Left, $r.Top, 0, 0, (New-Object System.Drawing.Size($w, $h)))
       }
     }
-    finally { $g.Dispose() }
+    finally { $dpi = $g.DpiX; $g.Dispose() }
 
-    Set-RoundedAlpha -Bitmap $bmp
+    Set-RoundedAlpha -Bitmap $bmp -Scale ($dpi / 96.0)
     $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
     Write-Host ("  写出 {0}  ({1}x{2})" -f (Split-Path -Leaf $Path), $w, $h)
@@ -242,8 +264,85 @@ function Save-Shot {
 
 try {
   Write-Host "临时目录：$Root"
+  $grower = $null
+  if ($nodeOk) {
+    # 后台动态字节：每 300ms 给在飞 message 的 reasoning part 追加一小段文本，
+    # 让 sidecar 快照出现落库增长 → 单卡主数字与多行在飞行都显示 ≈估算（琥珀）。
+    $grow = @"
+import { DatabaseSync } from 'node:sqlite';
+const db = new DatabaseSync(process.argv[2]);
+let n = 0;
+const t = setInterval(() => {
+  n++;
+  try {
+    // 增量在 JS 里算好再拼进 SQL：SQLite 没有 .repeat()，把 JS 写进 SQL 只会静默失败
+    db.exec("UPDATE part SET data = data || '" + '流式落库中'.repeat(9) + "' WHERE id = 'p_live_1'");
+  } catch {}
+  if (n >= 160) { clearInterval(t); process.exit(0); }
+}, 300);
+"@
+    $growPath = Join-Path $Root 'grow.mjs'
+    [System.IO.File]::WriteAllText($growPath, $grow, $NoBom)
+    $grower = Start-Process -FilePath (Get-Command node | Select-Object -ExpandProperty Source) `
+      -ArgumentList @($growPath, $DbPath) -WindowStyle Hidden -PassThru
+    Write-Host '  动态字节任务已启动（模拟流式落库）'
+  }
+
   Save-Shot -Language 'zh-CN' -Path (Join-Path $OutDir 'overlay-zh.png')
   Save-Shot -Language 'en-US' -Path (Join-Path $OutDir 'overlay-en.png')
+
+  # ------------------------------------------------------------ 多行模式（DESIGN.md §7.2）
+  # 往合成 db 里再加两个活跃会话（各带 rollout 真值）→ 界面切到多行并列：
+  # 在飞行（主会话）置顶高亮、≈估算 + 计时；空闲行各显各的速率。
+  if ($nodeOk) {
+    $S2 = 'sess_22222222-0000-4000-8000-000000000002'
+    $S3 = 'sess_33333333-0000-4000-8000-000000000003'
+    $Title2 = '并发任务 · 重构缓存模块'
+    $Title3 = '修复登录超时'
+    $mk2 = @"
+import { DatabaseSync } from 'node:sqlite';
+try {
+  const db = new DatabaseSync(process.argv[2]);
+  const now = Date.now();
+  const ins = db.prepare('INSERT INTO session (id, title, time_updated, task_type) VALUES (?, ?, ?, ?)');
+  ins.run(process.argv[5], process.argv[6], now - 30000, 'interactive');
+  ins.run(process.argv[7], process.argv[8], now - 90000, 'interactive');
+  console.log('MK2 OK');
+} catch (e) { console.log('MK2 FAIL: ' + e.message); process.exit(1); }
+"@
+    # 写成临时 .mjs 再执行：node -e 传多行脚本时 PS 的引号转义会把 JSON 双引号弄坏
+    $mk2Path = Join-Path $Root 'mk2.mjs'
+    [System.IO.File]::WriteAllText($mk2Path, $mk2, $NoBom)
+    & node $mk2Path $DbPath $Sid $DemoTitle $S2 $Title2 $S3 $Title3 2>&1 | Write-Host
+
+    # 空闲会话各带几条历史请求（rollout 真值），速率不同才看得出「各行是各自的数」
+    foreach ($pair in @(@($S2, 46.3), @($S3, 88.7))) {
+      $s = $pair[0]
+      $tps2 = $pair[1]
+      $sb2 = New-Object System.Text.StringBuilder
+      for ($i = 0; $i -lt 3; $i++) {
+        $dur2 = 2200 + $i * 300
+        $out2 = [int]($tps2 * $dur2 / 1000)
+        $at2 = [DateTime]::UtcNow.AddSeconds(-30 - $i * 25)
+        [void]$sb2.AppendLine(
+          '{"completedAt":"' + $at2.ToString('o') + '","durationMs":' + $dur2 +
+          ',"model":{"modelId":"GLM-5.3-Flash"},"response":{"usage":{"outputTokens":' + $out2 +
+          ',"reasoningTokens":0}},"type":"model_io","sessionId":"' + $s +
+          '","turnId":"turn_' + $s.Substring(5, 6) + '","querySource":"main_turn"}')
+      }
+      [System.IO.File]::WriteAllText((Join-Path $RolloutDir "model-io-$s.jsonl"), $sb2.ToString(), $NoBom)
+      (Get-Item -LiteralPath (Join-Path $RolloutDir "model-io-$s.jsonl")).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-25)
+    }
+    Write-Host '  多行数据就绪：2 个并发会话 + 各自 rollout 真值'
+
+    Save-Shot -Language 'zh-CN' -Path (Join-Path $OutDir 'overlay-multi-zh.png')
+    Save-Shot -Language 'en-US' -Path (Join-Path $OutDir 'overlay-multi-en.png')
+  }
+  else {
+    Write-Host '  无 node：跳过多行截图（需要 sidecar 提供活跃会话）'
+  }
+
+  try { if ($grower -and -not $grower.HasExited) { Stop-Process -Id $grower.Id -Force -ErrorAction SilentlyContinue } } catch { }
 }
 finally {
   Start-Sleep -Milliseconds 300
