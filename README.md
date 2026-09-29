@@ -4,16 +4,18 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4.svg)](#环境与兼容性)
 
-在 ZCode 界面**之外**开一个置顶小窗，实时显示模型生成速率（tok/s），并跟随你当前
+在 ZCode 界面**之外**开一个置顶小窗，实时显示模型生成速率（tok/s）。生成过程中
+显示琥珀色 `≈` 估算让数字动起来，并发多个任务时各占一行并列显示，并跟随你当前
 所在的会话。
 
 <p align="center">
   <img src="docs/images/overlay-zh.png" alt="TPS 小窗（中文）" width="324">
   &nbsp;&nbsp;
-  <img src="docs/images/overlay-en.png" alt="TPS overlay (English)" width="324">
+  <img src="docs/images/overlay-multi-zh.png" alt="TPS 小窗·多行并列（中文）" width="324">
 </p>
 
-<p align="center"><sub>生成中：绿点 + 在飞计时 + 亮白数字；柱状图是最近 40 次请求的速率。<br>
+<p align="center"><sub>左：生成中——琥珀色 ≈ 估算（在飞）+ 计时 + 最近 40 次请求柱状图；<br>
+右：并发多任务——活跃会话各占一行，在飞行置顶高亮，空闲行各显各的速率。<br>
 截图由 <a href="tools/capture-overlay.ps1">tools/capture-overlay.ps1</a> 用合成数据生成。</sub></p>
 
 English quickstart: Windows 10+ only. Add this repo as a plugin marketplace
@@ -40,15 +42,18 @@ plugin stops and cleans up the watcher automatically.
 ## 你会看到什么
 
 深色小窗：大号等宽数字是唯一的主角，其余信息以小号灰字收在下方，
-彩色只在表达状态时出现。
+彩色只在表达状态时出现。速率数字分两层：**真值**（白/灰）是最近一次请求的
+`outputTokens ÷ durationMs`；**估算**（琥珀色 `≈`）在生成过程中按当前消息字节
+增量 × 标定系数实时推算，请求结束即被真值覆盖——没有依据时不出估算。
 
 | 位置 | 含义 |
 |---|---|
-| 大号数字 | 最近一次模型请求的速率 = `outputTokens ÷ durationMs`。在飞时亮白，空闲时降为灰色 |
+| 大号数字 | 在飞时优先显示 `≈` 估算（琥珀），空闲时显示最近一次请求的真值 |
 | 左上圆点 | 绿色 = 正在生成或 2.5 秒内有新数据；红色 = 出错；灰色 = 空闲 |
 | 右上角 | 生成中显示本次请求已进行的秒数；空闲/等待时显示当前会话 id 前 8 位 |
-| 迷你柱状图 | 最近 40 次请求的速率，最右一根是当前值 |
+| 迷你柱状图 | 最近 40 次请求的真值速率，最右一根是当前值 |
 | 元信息三行 | 左列：模型名、本轮 turn 输出 token、会话累计输出 token；右列：会话标题（取不到时退回已统计请求数）、平均速率、单次最高速率 |
+| 多行模式 | 并发多任务时自动切换：最近 5 分钟活跃的会话各占一行（标题 + 各自速率），在飞行置顶高亮并带计时，上限 5 行折叠 `+N` |
 
 窗口可拖动并记忆位置，默认 85% 不透明度（`-Opacity` 可调 0.3–1.0），鼠标悬停时右上角
 淡入关闭钮。小窗跟随 ZCode 主窗口：ZCode 最小化时一并收起、恢复时弹回原位；ZCode 切到
@@ -86,7 +91,7 @@ plugin stops and cleans up the watcher automatically.
 |---|---|
 | 操作系统 | Windows 10 及以上（macOS / Linux 不支持） |
 | PowerShell | 5.1 及以上（系统自带）；脚本全部为 UTF-8 with BOM |
-| Node.js（可选） | **≥ 22.5**（需要内置的 `node:sqlite`），用来显示会话标题。没有 Node 也完全能用：元信息首行右列退回显示已统计请求数，速率等其余功能不受影响 |
+| Node.js（可选） | **≥ 22.5**（需要内置的 `node:sqlite`），用来显示会话标题、在飞估算与多会话并列。没有 Node 也完全能用：退回单会话卡片 + id 短码 + 在飞计时，速率真值等其余功能不受影响 |
 | ZCode | 3.14.3.7762 上实测通过 |
 | DPI | 100% / 200% 实测 |
 | 受限语言模式（CLM） | 自动降级并标注「精简模式（系统策略限制）」；**未在真 CLM 环境验证过** |
@@ -116,6 +121,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File zcode-tps\monitor\tps-mo
 
 # 会话跟随回归测试（6 个场景，退出码 0 即全部通过）
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File zcode-tps\tests\follow-test.ps1
+
+# L3 估算 + 多会话数据层回归测试（4 个场景）
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File zcode-tps\tests\estim-test.ps1
+
+# sidecar 数据契约测试（node >= 22.5）
+node zcode-tps\tests\sidecar-test.mjs
 
 # 重新生成上面的 README 截图
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\capture-overlay.ps1

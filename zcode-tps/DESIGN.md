@@ -211,10 +211,13 @@ L1 的计时器则每 250ms 都在动。
 
 sidecar 从 `session` 表读 `title`（0.2ms）。取不到时回退到 v1 的 `id` 前 8 位。
 
-> **最小版已落地**：sidecar（`monitor/tps-sidecar.mjs`）每 250ms 全量取 `session`
-> 表（不按 `time_updated` 过滤——恢复旧会话时该列不跟着刷新，实测 3 天前的会话
-> 刚被切回，按时间窗口取会漏标题），经交换文件递给主进程；标题显示于单会话卡片
-> 元信息首行右列，req 计数让位（退到 status.json 可查）。多行并列与 L3 仍是 v2 待办。
+> **已全部落地（0.3.0）**：sidecar 按 §8 契约输出 titles + sessions（活跃集合、
+> 当前 assistant message 的分类型字节计数），经交换文件递给主进程。标题显示于
+> 单会话卡片元信息首行右列；多行并列（§7.2）与 L3 估算（§6）均已实现并有回归测试
+> （tests/estim-test.ps1、tests/sidecar-test.mjs）。实测注意：part 计数口径是
+> UTF-16 码元（与 SQLite `length(text)` 的字符数同基准），k 的标定与使用同口径自洽；
+> 标定只认 30s 内完成的请求，基线仅在配对成功后消费——启动回看的历史记录
+> 会以 dR=0 误消费基线，是测试抓出来的实现坑。
 
 ### 7.2 多会话并列
 

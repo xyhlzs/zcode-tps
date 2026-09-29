@@ -12,6 +12,50 @@
 
 （下一个版本的在制品放这里。）
 
+## [0.3.0] — 2026-09-29
+
+**v2 主体落地**（DESIGN.md §6/§7 全部功能）：在飞估算与多会话并列，直接回应
+「刷新率偏慢」与「并发分不清是哪个任务」两条实测反馈。
+
+### Added
+
+- **在飞估算速率（L3，DESIGN.md §6）**：生成过程中速率数字不再一动不动。node sidecar
+  轮询 db.sqlite 里当前 assistant message 的 reasoning/text 字节数，监控按 7 秒滑动
+  窗口算增量，乘以由真实请求标定出的换算系数 k（保留最近 8 次配对，`usage` 真值修正），
+  显示为琥珀色 `≈N`，请求落盘后回落真值。窗口内落库不足 2 次（没有依据）时不出数字，
+  只显示在飞计时——FR1-4「每个数字可溯源」。k 标定只认 30 秒内完成的请求，
+  启动回看读到的历史记录不参与，基线只在真正配对成功后消费。
+
+- **多会话并列展示（DESIGN.md §7.2/§7.3）**：并发多个任务时不再「猜一个显示」。
+  活跃会话（最近 5 分钟内活动、排除子代理）各占一行：序号 + 标题 + 各自的速率；
+  在飞行置顶并带高亮条与计时，空闲行按最近活动排序；上限 5 行，超出折叠为 `+N`；
+  单会话时退回 v1 紧凑卡片。每行的真值来自各会话自己的 rollout tail（增量读取
+  抽成共用函数），主目标会话保证在场。窗口宽度/高度随模式与行数自适应，
+  关闭钮命中区同步更新。
+
+- **sidecar 升级到 DESIGN.md §8 完整数据契约**：`titles` 全量照旧，新增 `sessions`
+  数组（10 分钟活跃窗口、排除 `subagent_child`、上限 8），每项带当前 assistant
+  message 的 `msgId`/`msgSeq` 与分类型计数（reasoning/text/other，tool 载荷不参与
+  换算）。查询走 `(session_id, time_created, id)` 与 `(message_id, id)` 索引，
+  守住 §3.2 的查询代价约束。计数口径是 UTF-16 码元（与 SQLite `length(text)` 同基准），
+  标定与使用同口径自洽。
+
+- **在飞跟踪升级为按会话的请求表**：并发多任务各自计时，`started`/`completed`
+  按 sessionId 配对、`parentSpanId` 兜底，不再互相干扰。
+
+- **测试**：`tests/estim-test.ps1`（15 项：估算出现、真值标定、多行数据、无依据不出数）
+  与 `tests/sidecar-test.mjs`（7 项：合成库 + 真实 sidecar 子进程断言 §8 契约），
+  均接入 CI；follow-test 15 项回归通过。`status.json` 新增 `estimTps`/`calib*`/`rows`/
+  `inFlight`/`activeSessions` 字段供排查与断言。
+
+- **截图**：README 截图工具从两张变四张，新增多行并列形态；单卡图改为「≈估算」在飞
+  形态（VISUAL.md 预留的琥珀色就此启用）。
+
+### Documentation
+
+- README（根与插件）补多行模式、估算语义与测试入口；DESIGN.md §7.1 注记更新为
+  「已落地」；VISUAL.md 补多行布局小节。
+
 ## [0.2.0] — 2026-09-29
 
 **首个公开发布版本。** 可迁移性（PORTABILITY.md）五个层次全部落地，目标从「我本机能跑」

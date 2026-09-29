@@ -6,7 +6,7 @@
 <p align="center">
   <img src="../docs/images/overlay-zh.png" alt="TPS 小窗（中文）" width="324">
   &nbsp;&nbsp;
-  <img src="../docs/images/overlay-en.png" alt="TPS overlay (English)" width="324">
+  <img src="../docs/images/overlay-multi-zh.png" alt="TPS 小窗·多行并列（中文）" width="324">
 </p>
 
 **English quickstart** — Windows 10+ only. Add this repo as a plugin marketplace
@@ -17,8 +17,9 @@ opacity, ZCode data home, window matching). Stop with `/tps stop`; uninstalling 
 plugin stops and cleans up the watcher automatically.
 
 环境要求：Windows 10 及以上、Windows PowerShell 5.1+（系统自带）；macOS/Linux 不支持。
-**可选** Node.js ≥ 22.5：用来显示会话标题，没有 Node 也能用（元信息首行右列退回显示
-请求数）。ZCode 侧在 3.14.3.7762 上实测通过（数据源是内部文件，没有官方 API 保证，见
+**可选** Node.js ≥ 22.5：用来显示会话标题、在飞估算与多会话并列，没有 Node 也能用
+（退回单会话卡片 + id 短码 + 在飞计时，速率真值不受影响）。ZCode 侧在 3.14.3.7762 上
+实测通过（数据源是内部文件，没有官方 API 保证，见
 [数据来源与已知限制](#数据来源与已知限制)）。企业策略的受限语言模式（CLM）下功能自动
 降级，小窗会标注「精简模式（系统策略限制）」。
 
@@ -35,14 +36,28 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 深色小窗（#1A1D22，视觉方案见 VISUAL.md），「数字即界面」：大号等宽数字是唯一的
 主角，其余信息以小号灰字收在下方，彩色只在表达状态时出现。
 
+速率数字分两层，诚实度不同、看得出来：
+
+| 层 | 显示 | 含义 |
+|---|---|---|
+| 真值 | `62.4`（白/灰） | 最近一次模型请求的 `outputTokens ÷ durationMs`，rollout 落盘后更新 |
+| 估算 | `≈62`（琥珀色） | **生成过程中**按「当前消息字节数 × 换算系数」的滑动窗口估算。系数 k 由最近完成的请求按真值标定（`status.json` 的 `calib*` 可查）；窗口内落库不足 2 次时不出估算，只显示计时——没有依据的数字不会显示 |
+
 | 位置 | 含义 |
 |---|---|
-| 大号数字 | 最近一次模型请求的速率 = `outputTokens ÷ durationMs`；等宽字体，刷新时字宽稳定不抖。在飞时亮白，空闲时降为灰色 |
 | 左上圆点 | 绿色 = 正在生成（日志有 started 未配对 completed 的请求）或 2.5 秒内有新数据；红色 = 出错；灰色 = 空闲 |
 | 右上角 | 生成中显示本次请求已进行的秒数（计时来源是日志 `model.request.started`，≤1s 刷新）；空闲/等待时显示 `id xxxxxxxx`（当前会话 id 前 8 位） |
-| 迷你柱状图 | 最近 40 次请求的速率，历史柱灰色，最右一根是当前值（在飞时绿色）；纵轴带迟滞，刷出新高不会整图重缩放 |
+| 迷你柱状图 | 最近 40 次请求的真值速率，历史柱灰色，最右一根是当前值（在飞时绿色）；纵轴带迟滞，刷出新高不会整图重缩放 |
 | 元信息三行 | 左列：模型名（超长截断）、本轮 turn 输出 token、会话累计输出 token；右列：会话标题（取不到时退回已统计请求数）、平均速率（Σ outputTokens ÷ Σ durationMs）、单次请求最高速率 |
 | 状态文案 | 归属切到无数据会话时显示「该会话暂无生成数据」；出错时显示红色错误信息 |
+
+### 多会话并列
+
+同时跑多个任务时（ZCode 侧是常态），窗口自动切到**多行模式**：最近 5 分钟内活跃的
+会话各占一行——序号 + 标题 + 各自的速率。在飞的一行置顶、带高亮条、第二行显示
+计时与该会话累计输出；空闲行按最近活动排序；上限 5 行，超出折叠为 `+N`。只看单个
+会话时退回上面的紧凑卡片。每行的真值速率来自各会话自己的 rollout 文件，
+显示目标都能和侧边栏对上。
 
 窗口可拖动（拖完位置记在 `%LOCALAPPDATA%\ZCodeTpsMonitor\pos.txt`）。
 关闭钮平时不显示，鼠标悬停到小窗上时右上角淡入 `×`。窗口默认 85% 不透明度
@@ -115,9 +130,10 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 
 **已知边界**：纯「浏览式切换」——切到一个仍在驻留期内（10 分钟内活动过）的会话、
 又不发消息——在日志和数据库里没有任何事件可依据（窗口标题固定为 `ZCode`，
-localStorage 只存草稿，没有持久化的「当前会话」）。此时显示保持在上一个会话。
-要覆盖这种情况，需要并列显示所有会话（[DESIGN.md](DESIGN.md) §7 的多行方案）或读
-UI 无障碍树（§12 的开放问题）。
+localStorage 只存草稿，没有持久化的「当前会话」）。此时**单卡显示**保持在上一个
+会话。0.3.0 起多会话并列展示覆盖了这种场景的主痛点：所有活跃会话都列在窗口里，
+不需要「切过去看」。要覆盖「窗口里只显一个」的精确跟随，剩下的路径是读 UI
+无障碍树（DESIGN.md §12 的开放问题）。
 
 ## 数据来源与已知限制
 
@@ -127,17 +143,19 @@ UI 无障碍树（§12 的开放问题）。
   含 `durationMs` 与 `response.usage.outputTokens`，是速率的唯一真实来源。
   （日志里的同一组数字已经被他们写成 `[Redacted]` 了。）
 - `~/.zcode/cli/log/zcode-YYYY-MM-DD.jsonl` —— 只用来判断当前会话。
-- `~/.zcode/cli/db/db.sqlite` 的 `session` 表 —— 只用来取会话标题。PowerShell 5.1
-  没有 SQLite provider，所以标题由一个独立的 Node 子进程
-  （`monitor/tps-sidecar.mjs`，用内置 `node:sqlite`）每 250ms 只读轮询、经交换文件
-  `sidecar.json` 递给监控。监控自己不碰 sqlite。没有 Node、连续 3 轮取不到新鲜快照、
-  或表结构变更时自动放弃，退回显示会话 id 前 8 位——**这条路已实测**（把 node 从
-  PATH 移除后跑监控：进程存活、速率照常、`status.json` 的 `sidecar` 为 `dead`）。
+- `~/.zcode/cli/db/db.sqlite` 的 `session` / `message` / `part` 表 —— 会话标题、
+  在飞估算的字节采样与多会话列表都来自这里。PowerShell 5.1 没有 SQLite provider，
+  所以这部分由一个独立的 Node 子进程（`monitor/tps-sidecar.mjs`，用内置
+  `node:sqlite`）每 250ms 只读轮询、经交换文件 `sidecar.json` 递给监控。监控自己
+  不碰 sqlite。没有 Node、连续 3 轮取不到新鲜快照、或表结构变更时自动放弃，
+  退回单会话卡片 + id 前 8 位——**这条路已实测**（把 node 从 PATH 移除后跑监控：
+  进程存活、速率照常、`status.json` 的 `sidecar` 为 `dead`）。
 
 由此带来三个限制：
 
-1. **不是逐 token 平滑刷新**，粒度是「一次流式生成结束」。一个回合里有几次工具调用
-   就有几次刷新，观感是活的，但不会像打字机那样连续跳。
+1. **真值不是逐 token 平滑刷新**，粒度是「一次流式生成结束」。生成期间的观感由
+   在飞估算补上：DB 落库是中位 3.5 秒一次的跳跃式补齐（实测），所以估算数字是
+   「每几秒动一次」而不是打字机式连续跳，且带 `≈` 标注。
 2. **时长含首字延迟（TTFT）**，所以算出来是端到端速率，比模型纯解码速率略低。
 3. 单个 rollout 记录里带完整对话历史，长会话下单条可达数 MB。脚本因此不整体解析
    JSON（PS 5.1 的 `ConvertFrom-Json` 有 2MB 上限），只从行首/行尾切片正则提取
@@ -186,6 +204,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 | 字段 | 说明 |
 |---|---|
 | `source` | 目标是怎么选出来的：`override`（手动钉死）/ `intent`（用户意图）/ `intent-wait`（意图会话还没有数据，等待态）/ `mtime`（意图过期后的兜底）/ `none` |
+| `inFlight` / `inFlightElapsedSec` | 主目标会话是否在飞、已飞秒数（L1 信号） |
+| `estimTps` | 当前在飞估算（L3）；`null` = 不在飞，或窗口内落库不足 2 次没有依据 |
+| `calibReasoningK` / `calibTextK` / `calib*N` | 估算换算系数（真值标定）与样本数 |
+| `rows` / `moreRows` / `activeSessions` | 多会话并列的行数据（各行的 `tps`/`inFlight`/`estim`）、被折叠的行数、sidecar 活跃会话数 |
 | `pluginRoot` | 监控脚本所属的插件根目录；`/tps start` 用它定位脚本，卸载毒丸盯的是它的消失 |
 | `waiting` | 归属已切到某个会话但它还没有生成数据（窗口显示「该会话暂无生成数据」） |
 | `zcodeWin` | ZCode 主窗口状态：`normal` / `minimized` / `hidden`（不在前台，小窗已隐藏）/ `closed` / `none`（`none`=没找到，不跟随） |
@@ -196,15 +218,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 
 - `requests = 0` 且 `skipped > 0`：读到行但字段没认出来，说明 ZCode 改了格式。
 - 想验证跟随逻辑，用 `-LogDir` / `-RolloutDir` / `-StateDir` 指向合成目录做受控测试，
-  或直接跑现成的回归测试：
+  或直接跑现成的回归测试（CI 里同样跑这三条）：
 
   ```powershell
+  # 会话跟随：6 个场景 15 项断言
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\follow-test.ps1
+
+  # L3 估算 + 多会话数据层：4 个场景 15 项断言
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\estim-test.ps1
+
+  # sidecar 数据契约：node 直接跑（需要 node >= 22.5）
+  node tests\sidecar-test.mjs
   ```
 
-  它用合成日志/rollout 驱动一个隔离的 `-Headless` 监控进程，断言 6 个场景（意图跟随、
-  后台会话持续生成时不抢归属、幽灵会话不劫持、无数据会话的等待态不抖动、子代理不影响
-  归属、意图过期后回落），退出码 0 即全部通过。
+  前两条用合成日志/rollout/快照驱动隔离的 `-Headless` 监控进程（跟随：意图、后台会话
+  不抢归属、幽灵会话不劫持、等待态不抖动、子代理不影响、意图过期回落；估算：窗口内
+  落库足够才出数、完成请求按真值标定系数、并发各行各的、无依据不出数字），退出码 0
+  即全部通过。第三条起一个真实 sidecar 子进程轮询合成库，断言 `sidecar.json` 的
+  契约字段。
 
 ## 启停与卸载
 
