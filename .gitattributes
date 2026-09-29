@@ -1,0 +1,21 @@
+# 行尾统一 LF。仓库现状即 LF（git ls-files --eol 全为 i/lf w/lf），
+# 这条规则让后来者在 Windows 上开启 core.autocrlf 也不会把行尾写乱。
+* text=auto eol=lf
+
+# PowerShell 脚本必须保持 UTF-8 with BOM：PS 5.1 读无 BOM 的 .ps1 时按 ANSI（中文
+# 系统上是 GBK）解析，中文注释和字符串直接乱码、甚至断串（PORTABILITY.md §2 L5.2
+# 把这条列为硬约束，§5 记了实际踩坑）。
+#
+# 设 -text 让 git 不对这些文件做任何字节改写：checkout / archive / 合并都字节原样，
+# BOM 和行尾都不会被动。-text 只关行尾规范化，不影响 diff（git 仍按内容判文本）。
+*.ps1 -text
+
+# 二进制资源不做行尾转换与文本 diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.exe binary
+*.dll binary

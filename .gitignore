@@ -1,0 +1,26 @@
+# 编辑器 / IDE
+.vs/
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+
+# 操作系统
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.DS_Store
+
+# 监控运行时状态
+# 正常安装时这些文件落在 %LOCALAPPDATA%\ZCodeTpsMonitor，不在仓库里；
+# 只有就地裸跑脚本（README「手动运行与自检」）时才会掉在仓库根，别提交进来。
+status.json
+pos.txt
+stop.flag
+config.json
+
+# 冒烟测试 / 临时副本
+tmp/
+.smoke/
+smoke/

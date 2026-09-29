@@ -1,0 +1,68 @@
+name: Bug 报告
+description: 小窗行为不对、数字不对、跟随不对，或插件装不上
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先看仓库 README 的「排查」章节，那里覆盖了「没看到窗口 / 被别的窗口盖住」
+        「数字发虚」「控制台一闪而过」几个常见情况。
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 你期望发生什么，实际发生了什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: status.json
+      description: |
+        排查入口。跑一次无窗自检，把输出的 status.json 贴在这里：
+
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File zcode-tps\monitor\tps-monitor.ps1 -Headless -Seconds 10
+        Get-Content "$env:LOCALAPPDATA\ZCodeTpsMonitor\status.json" -Raw
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: follow
+    attributes:
+      label: 如果是「跟随」问题，属于哪一类
+      options:
+        - 切到另一个会话后数字没跟过去
+        - 显示了别的会话的数字
+        - 一直显示「该会话暂无生成数据」
+        - 窗口没跟着 ZCode 最小化 / 关闭
+        - 不确定 / 不是跟随问题
+    validations:
+      required: true
+
+  - type: input
+    id: zcode
+    attributes:
+      label: ZCode 版本
+      description: "设置 → 关于，或 (Get-Item \"$env:LOCALAPPDATA\\Programs\\ZCode\\ZCode.exe\").VersionInfo.FileVersion"
+      placeholder: 3.14.3.7762
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本与显示缩放
+      placeholder: Windows 11 24H2 / 200%
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 自查
+      options:
+        - label: "我确认 config.json 里的 windowTitle / windowProcess 与我的 ZCode 一致"
+        - label: "我确认小窗进程只有一个（Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*tps-monitor*' }）"

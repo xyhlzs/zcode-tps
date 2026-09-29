@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 插件只在 Windows 上运行（WinForms + user32），测试也只保证在 Windows 上通过
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 清单 JSON 可解析
+        shell: pwsh
+        run: |
+          $files = @(
+            'marketplace.json',
+            'zcode-tps/.zcode-plugin/plugin.json',
+            'zcode-tps/hooks/hooks.json'
+          )
+          foreach ($f in $files) {
+            Get-Content -LiteralPath $f -Raw | ConvertFrom-Json | Out-Null
+            Write-Host "OK  $f"
+          }
+
+      - name: 版本号在 marketplace 与 plugin.json 两处一致
+        shell: pwsh
+        run: |
+          $m = (Get-Content -LiteralPath 'marketplace.json' -Raw | ConvertFrom-Json).plugins[0].version
+          $p = (Get-Content -LiteralPath 'zcode-tps/.zcode-plugin/plugin.json' -Raw | ConvertFrom-Json).version
+          if ($m -ne $p) {
+            Write-Error "版本号不一致：marketplace.json=$m，plugin.json=$p（CHANGELOG.md 的发布清单要求同步递增）"
+            exit 1
+          }
+          Write-Host "OK  version=$m"
+
+      - name: .ps1 必须带 UTF-8 BOM
+        shell: pwsh
+        run: ./tools/check-bom.ps1
+
+      - name: 会话跟随回归测试
+        shell: pwsh
+        run: ./zcode-tps/tests/follow-test.ps1

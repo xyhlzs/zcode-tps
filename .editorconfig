@@ -1,0 +1,18 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# PowerShell 脚本必须带 BOM：PS 5.1 读无 BOM 的 .ps1 时按 ANSI（中文系统上是 GBK）
+# 解析，中文注释和字符串直接乱码。见 .gitattributes 与 tools\check-bom.ps1。
+[*.ps1]
+charset = utf-8-bom
+
+# Markdown 里行尾两个空格是有意义的换行，别被自动删除
+[*.md]
+trim_trailing_whitespace = false
