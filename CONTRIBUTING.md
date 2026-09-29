@@ -118,6 +118,11 @@ git push -u origin main
 
 （本地分支已从 `master` 改名为 `main`，与 GitHub 默认分支名对齐。）
 
+推送后别人「添加市场」时粘贴的就是仓库地址。ZCode 把它记在
+`~/.zcode/cli/config.json` 的 `plugins.extraKnownMarketplaces` 下，GitHub 来源的形态是
+`{"source": {"source": "github", "repo": "<owner>/<repo>"}}`——发布后可以拿它核对市场
+有没有被正确识别。
+
 推送后补两处，它们都需要仓库的真实地址：
 
 - 根 `README.md` 顶部加 CI 徽章：
