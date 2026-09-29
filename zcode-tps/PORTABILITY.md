@@ -108,17 +108,19 @@
 
 ## 3. 验收矩阵
 
-| # | 场景 | 验收 |
-|---|---|---|
-| P1 | 全新 Win11 + zh-CN，marketplace 安装 | 装完首个会话启动即出现小窗，零手工步骤 |
-| P2 | en-US 系统 | 界面文案为英文；数字格式随 locale |
-| P3 | 100% / 150% / 200% DPI | 数字锐利、布局无重叠（现有能力回归） |
-| P4 | 受限语言模式（CLM） | 不崩；小窗标注精简模式；数据功能正常 |
-| P5 | 卸载插件 | ≤5s 内监控进程消失，`%LOCALAPPDATA%\ZCodeTpsMonitor` 清空 |
-| P6 | `/tps stop` | 监控退出；再 `/tps start` 恢复 |
-| P7 | ZCode 窗口标题/进程名与预期不符（config 改写后） | 跟随恢复 |
-| P8 | 无 ZCode 裸跑监控 | 不误退出、不误关（现有行为回归） |
-| P9 | 脚本被下载后带 MOTW | 可运行（Bypass） |
+状态标注为 2026-09-29 本机（Win11、200% DPI、zh-CN、ZCode 运行中）实测结果：
+
+| # | 场景 | 验收 | 状态 |
+|---|---|---|---|
+| P1 | 全新 Win11 + zh-CN，marketplace 安装 | 装完首个会话启动即出现小窗，零手工步骤 | ✅ 链路实测：hook 拉起 0→1，stop.flag 收尾 1→0（DPI 2.0 下渲染锐利） |
+| P2 | en-US 系统 | 界面文案为英文；数字格式随 locale | ✅ `config.language=en` 冒烟截图核对 |
+| P3 | 100% / 150% / 200% DPI | 数字锐利、布局无重叠（现有能力回归） | ✅ 本机 200% 实测；100%/150% 靠同一套缩放代码，未逐档实测 |
+| P4 | 受限语言模式（CLM） | 不崩；小窗标注精简模式；数据功能正常 | ⚠️ **本机无法模拟**：PS 5.1 只随 WDAC 策略启用 CLM，`__PSLockdownPolicy` 环境变量被忽略（实测 Mode 仍为 FullLanguage）。检测与降级逻辑已实现但未在真 CLM 下验证 |
+| P5 | 卸载插件 | ≤5s 内监控进程消失，`%LOCALAPPDATA%\ZCodeTpsMonitor` 清空 | ✅ 副本目录删除后 ≤4s 退出，状态文件清空 |
+| P6 | `/tps stop` | 监控退出；再 `/tps start` 恢复 | ✅ stop.flag 路径实测（命令 Markdown 本体需安装后人工验证） |
+| P7 | ZCode 窗口标题/进程名与预期不符（config 改写后） | 跟随恢复 | ✅ 错标题 → `zcodeWin=none`（不跟随不误关）；正确标题 → 正常跟随 |
+| P8 | 无 ZCode 裸跑监控 | 不误退出、不误关（现有行为回归） | ✅ 同 P7 错标题场景（从未找到窗口时不动作） |
+| P9 | 脚本被下载后带 MOTW | 可运行（Bypass） | ✅ 带 Zone.Identifier 的副本正常跑完自检 |
 
 ---
 
@@ -140,6 +142,8 @@
 |---|---|
 | 毒丸误杀：脚本放在可被清理的临时目录时（本仓冒烟测试即如此）监控会退出 | `-NoWatchdog` 豁免；README 写明「常驻运行请走 marketplace 安装路径」 |
 | ZCode 是否有官方的数据目录环境变量未考证 | 有则 config.zcodeHome 默认值改为读它；没有则保持默认路径 |
-| commands 字段的 manifest 语法未验证 | 实现第 5 步前先用 plugin-creator 核对；不成立则退化为 skill 触发 |
-| en 文案在 8pt 下的宽度与 zh 不同 | 布局按 en 文案最长串核对一次 MeasureString |
+| commands 字段的 manifest 语法未验证 | 已按 plugin-creator 规范核对（Markdown + frontmatter，`$ARGUMENTS`）；**运行时行为仍需安装后人工验证** |
+| en 文案在 8pt 下的宽度与 zh 不同 | 已实测：en 冒烟截图无重叠（最长串 `No generation data in this session yet` 在元信息行宽内） |
 | CLM 下的探测本身可用性 | `LanguageMode` 读取在 CLM 下允许；若连检测都失败按「受限」处理 |
+| **CLM 降级深度被低估**：§2 L1 假设「纯 .NET 调用大多可用」，但真 CLM 的类型白名单可能连 `FileStream`/`Mutex` 都拦，降级会比设计更深（数据管线也可能失效） | P4 本机无法模拟（见验收矩阵）。若真机验证发现数据管线失效，精简模式的含义要扩大，届时重新评估 |
+| 测试脚本自身踩了 BOM 坑（无 BOM 的 .ps1 含中文在 PS5.1 下乱码断串，2026-09-29 实测撞上） | 插件自带的 .ps1 全部已带 BOM（已核对）；给仓库外发脚本时保持 BOM 是硬约束 |
