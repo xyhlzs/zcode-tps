@@ -12,6 +12,13 @@
 
 ### Added
 
+- **会话标题显示**：小窗元信息首行右列优先显示当前会话的人能读懂的标题
+  （落实 FR1-5 的「标题」半边），req 计数在场时退到 `status.json` 可查。标题由
+  新增的 node sidecar（`monitor/tps-sidecar.mjs`，用 `node:sqlite` 只读轮询
+  `db.sqlite` 的 `session` 表）每 250ms 写入交换文件递给监控；没有 node 环境、
+  sidecar 连续失败或表结构变更时自动降级回 v1 的 id 前 8 位短码，无头/受控测试
+  不启动 sidecar。DESIGN.md §7.1 的完整多会话并列展示仍是 v2 待办。
+
 - 仓库工程化：`.gitattributes`（LF 统一 + `.ps1` 字节原样以保住 UTF-8 BOM）、
   `.gitignore`、`LICENSE`（MIT）、根 `README.md`、本文件、`CONTRIBUTING.md`、
   GitHub Actions CI（清单 JSON 校验 + `.ps1` BOM 守卫 + 跟随回归测试）、

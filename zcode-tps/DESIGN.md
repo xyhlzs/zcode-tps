@@ -211,6 +211,11 @@ L1 的计时器则每 250ms 都在动。
 
 sidecar 从 `session` 表读 `title`（0.2ms）。取不到时回退到 v1 的 `id` 前 8 位。
 
+> **最小版已落地**：sidecar（`monitor/tps-sidecar.mjs`）每 250ms 全量取 `session`
+> 表（不按 `time_updated` 过滤——恢复旧会话时该列不跟着刷新，实测 3 天前的会话
+> 刚被切回，按时间窗口取会漏标题），经交换文件递给主进程；标题显示于单会话卡片
+> 元信息首行右列，req 计数让位（退到 status.json 可查）。多行并列与 L3 仍是 v2 待办。
+
 ### 7.2 多会话并列
 
 把「猜一个」改成「全都列出来」。活跃会话集合 = `session.time_updated` 在最近

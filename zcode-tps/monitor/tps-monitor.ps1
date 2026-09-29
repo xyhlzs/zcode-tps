@@ -24,6 +24,11 @@
     创建里 24 次创建后没有任何对话活动），采纳它们会把显示目标劫持到一个
     永远没有数据的会话上。
 
+  标题：会话标题（session.title）只存在于 db.sqlite，而 PS 5.1 没有 SQLite
+  provider（DESIGN.md §3.3），由 node sidecar（tps-sidecar.mjs，node:sqlite
+  只读轮询）经交换文件 sidecar.json 递过来；没有 node 或 sidecar 连续失败时
+  退回 id 前 8 位（DESIGN.md §9）。
+
   == 为什么不用 ConvertFrom-Json ==
   单条 rollout 记录里 request.messages 带完整对话历史，长会话下单条可达数 MB，
   既超过 PS 5.1 的 MaxJsonLength(2MB) 上限，整体解析也浪费。
@@ -84,6 +89,7 @@ $PosFile = Join-Path $StateDir 'pos.txt'
 $StatusFile = Join-Path $StateDir 'status.json'
 $ConfigFile = Join-Path $StateDir 'config.json'
 $StopFlag = Join-Path $StateDir 'stop.flag'
+$SidecarSnap = Join-Path $StateDir 'sidecar.json'   # node sidecar 写的标题快照（DESIGN.md §8 交换文件）
 
 # 卸载毒丸的判定基准：脚本住在 <插件根>\monitor\ 下，上级就是插件根
 # （PORTABILITY.md §2 L4-1）。插件被卸载/缓存被清时该目录消失。
@@ -225,10 +231,84 @@ $script:ZCodeState = 'none'                                    # none / normal /
 $script:ReqStart = $null                                       # 在飞请求 { sid, utc }（L1 信号，见 DESIGN.md §6）
 $script:Hovered = $false                                       # 鼠标是否悬停在小窗上（控制 × 显隐）
 
+# 标题 sidecar（tps-sidecar.mjs）的生命周期状态，重启/放弃策略见 DESIGN.md §9
+$script:NodeExe = $null
+$script:SidecarProc = $null
+$script:SidecarFails = 0        # 连续「无新鲜快照」次数，≥3 放弃，退回 id 短码
+$script:SidecarDead = $false
+$script:TitleMap = @{}          # sessionId → title，来自 sidecar 快照
+
 $script:Drag = $false
 $script:DragMoved = $false
 $script:DragOffX = 0
 $script:DragOffY = 0
+
+# ------------------------------------------------------------------ 标题 sidecar 生命周期
+
+function Start-Sidecar {
+  # 无头自检/受控测试不碰真实 db、不留子进程
+  if ($Headless -or $script:SidecarDead) { return }
+  if (-not $script:NodeExe) {
+    try {
+      $c = Get-Command node -ErrorAction SilentlyContinue
+      if ($c -and $c.Source) { $script:NodeExe = $c.Source }
+    } catch { }
+  }
+  if (-not $script:NodeExe) { $script:SidecarDead = $true; return }
+  $sc = Join-Path $PSScriptRoot 'tps-sidecar.mjs'
+  if (-not (Test-Path -LiteralPath $sc)) { $script:SidecarDead = $true; return }
+  try {
+    # 用 CreateNoWindow 而不是 Start-Process -WindowStyle Hidden：node 是控制台
+    # 程序，后者会闪黑框。PS 5.1 没有 ProcessStartInfo.ArgumentList，手工拼引号。
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $script:NodeExe
+    $psi.Arguments = '"{0}" "{1}" "{2}" "{3}" 250' -f $sc, (Join-Path (Join-Path $ZCodeHome 'db') 'db.sqlite'), $SidecarSnap, $PID
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $script:SidecarProc = [System.Diagnostics.Process]::Start($psi)
+  } catch {
+    $script:SidecarProc = $null
+  }
+}
+
+function Update-Sidecar {
+  if ($Headless -or $script:SidecarDead) { return }
+  # 快照年龄：sidecar 按 4Hz 覆盖写，3s 内算新鲜；文件缺失按无穷大处理
+  $ageMs = [double]::PositiveInfinity
+  try {
+    if (Test-Path -LiteralPath $SidecarSnap) {
+      $ageMs = ([DateTime]::Now - (Get-Item -LiteralPath $SidecarSnap).LastWriteTime).TotalMilliseconds
+    }
+  } catch { }
+  if ($ageMs -lt 3000) {
+    try {
+      $snap = Get-Content -LiteralPath $SidecarSnap -Raw -Encoding UTF8 | ConvertFrom-Json
+      $map = @{}
+      if ($snap -and $snap.titles) {
+        foreach ($p in $snap.titles.PSObject.Properties) { $map[$p.Name] = [string]$p.Value }
+      }
+      $script:TitleMap = $map
+      $script:SidecarFails = 0
+    } catch { }   # 读到半截：沿用上一份快照（DESIGN.md §9）
+    return
+  }
+  $procAlive = $false
+  try { $procAlive = ($script:SidecarProc -and -not $script:SidecarProc.HasExited) } catch { }
+  if ($procAlive -and $ageMs -lt 10000) { return }   # 启动初期的空窗，等下一拍
+  # 进程死了，或活着却 10s 无产出：杀掉重启；连续 3 次失败进入精简模式（DESIGN.md §9）
+  try { if ($script:SidecarProc -and -not $script:SidecarProc.HasExited) { $script:SidecarProc.Kill() } } catch { }
+  $script:SidecarProc = $null
+  $script:SidecarFails++
+  if ($script:SidecarFails -ge 3) { $script:SidecarDead = $true; return }
+  Start-Sidecar
+}
+
+function Stop-Sidecar {
+  try {
+    if ($script:SidecarProc -and -not $script:SidecarProc.HasExited) { $script:SidecarProc.Kill() }
+  } catch { }
+  $script:SidecarProc = $null
+}
 
 # ------------------------------------------------------------------ 日志：判断当前会话
 
@@ -621,13 +701,23 @@ function Get-SessTps {
 }
 
 function Get-ShortSessionId {
-  # 会话短码：FR1-5 要求显示目标可核对。人能读懂的标题要等 DESIGN.md v2 的
-  # sidecar，在此之前 id 前 8 位是唯一可用的标识。
+  # 会话短码：FR1-5 要求显示目标可核对。标题 sidecar（tps-sidecar.mjs）取到
+  # 人能读懂的标题时显示标题，这里只在 sidecar 不可用（无 node / 连续失败）时兜底。
   $sid = $script:Stats.sessionId
   if (-not $sid) { return '' }
   $sid = $sid -replace '^sess_', ''
   if ($sid.Length -gt 8) { return $sid.Substring(0, 8) }
   return $sid
+}
+
+function Get-SessionTitle {
+  # 当前显示会话的标题（sidecar 快照）。取不到返回空串，由调用方回退 id 短码。
+  $sid = $script:Stats.sessionId
+  if (-not $sid) { return '' }
+  $t = $null
+  try { $t = $script:TitleMap[$sid] } catch { return '' }
+  if ($t) { return [string]$t }
+  return ''
 }
 
 function Write-Status {
@@ -643,6 +733,11 @@ function Write-Status {
       $intentAt = $script:IntentAtUtc.ToString('o')
       $intentAgeMs = [int](([DateTime]::UtcNow - $script:IntentAtUtc).TotalMilliseconds)
     }
+    $sidecarState = 'off'
+    if (-not $Headless) {
+      if ($script:SidecarDead) { $sidecarState = 'dead' }
+      else { $sidecarState = 'ok' }
+    }
     $snapshot = [ordered]@{
       target              = $script:Stats.target
       source              = $script:Stats.source
@@ -652,8 +747,10 @@ function Write-Status {
       intentAtUtc         = $intentAt
       intentAgeMs         = $intentAgeMs
       intentTtlMs         = $IntentTtlMs
+      sidecar             = $sidecarState
       model               = $script:Stats.model
       sessionId           = $script:Stats.sessionId
+      sessionTitle        = (Get-SessionTitle)
       turnId              = $script:Stats.turnId
       requests            = $script:Stats.requests
       skipped             = $script:Stats.skipped
@@ -1066,18 +1163,30 @@ $form.Add_Paint({
     else {
       $model = $script:Stats.model
       if (-not $model) { $model = $script:Str.noModel }
-      # 受限语言模式下窗口跟随/置顶会静默失效（PORTABILITY.md §2 L1），
-      # 借这个位置如实标注；req 计数退到 status.json 可查
-      $reqText = $script:Str.restricted
-      if (-not $script:Restricted) { $reqText = $script:Str.reqFmt -f $script:Stats.requests }
-      $reqW = $g.MeasureString($reqText, $script:Fonts.stat).Width
-      $avail = ($W - (Px 12) - $reqW - (Px 10)) - (Px 12)
+      # 右列：受限模式标注 > 会话标题（FR1-5 人能读懂的归属）> req 计数。
+      # 标题在场时 req 退到 status.json 可查（req 本就不是 FR1 条目）。
+      $rightText = $script:Str.restricted
+      if (-not $script:Restricted) {
+        $title = Get-SessionTitle
+        if ($title) {
+          $rightText = $title
+          # 标题最长 60 字符，先按半窗截断，给左列的模型名留位置
+          $cap = $W * 0.55
+          while ($rightText.Length -gt 1 -and $g.MeasureString($rightText, $script:Fonts.stat).Width -gt $cap) {
+            $rightText = $rightText.Substring(0, $rightText.Length - 1)
+          }
+          if ($rightText -ne $title) { $rightText += '…' }
+        }
+        else { $rightText = $script:Str.reqFmt -f $script:Stats.requests }
+      }
+      $rightW = $g.MeasureString($rightText, $script:Fonts.stat).Width
+      $avail = ($W - (Px 12) - $rightW - (Px 10)) - (Px 12)
       while ($model.Length -gt 1 -and $g.MeasureString($model, $script:Fonts.stat).Width -gt $avail) {
         $model = $model.Substring(0, $model.Length - 1)
       }
       if ($script:Stats.model -and $model -ne $script:Stats.model) { $model += '…' }
       $g.DrawString($model, $script:Fonts.stat, $script:Brushes.sub, (Px 12), $metaY1)
-      Draw-Right -g $g -text $reqText -font $script:Fonts.stat `
+      Draw-Right -g $g -text $rightText -font $script:Fonts.stat `
         -brush $script:Brushes.faint -rightX ($W - (Px 12)) -y $metaY1
 
       $turnText = '—'
@@ -1167,12 +1276,13 @@ $timer.Add_Tick({
     if (-not $NoWatchdog -and ($script:TickCount % 5) -eq 0 -and $script:PluginRoot -and
       -not (Test-Path -LiteralPath $script:PluginRoot)) {
       $script:TearDown = $true
-      Remove-Item -LiteralPath $PosFile, $StatusFile, $ConfigFile -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $PosFile, $StatusFile, $ConfigFile, $SidecarSnap -Force -ErrorAction SilentlyContinue
       $form.Close()
       return
     }
     Update-ZCodeFollow
     if ($form.IsDisposed) { return }   # 本轮跟随把窗口关了
+    Update-Sidecar
     if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized -or -not $form.Visible) {
       # 收起/隐藏状态：不置顶、不重绘（SetWindowPos 的 SHOWWINDOW 会把窗口顶回来），
       # 但统计照常，保持 status.json 新鲜
@@ -1187,6 +1297,8 @@ $timer.Add_Tick({
   })
 $timer.Start()
 
+Start-Sidecar
 Update-Stats
 Write-Status
 [void][System.Windows.Forms.Application]::Run($form)
+Stop-Sidecar
