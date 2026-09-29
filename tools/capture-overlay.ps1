@@ -141,15 +141,47 @@ $logLines.Add('{"timestamp":"' + [DateTime]::UtcNow.AddSeconds(-4.5).ToString('o
   '","level":"info","event":"model.request.started","module":"demo","message":"demo","sessionId":"' + $Sid + '"}')
 [System.IO.File]::WriteAllText($logPath, ($logLines -join "`n") + "`n", $NoBom)
 
+# 合成一个 ZCode 数据目录，只放 db/db.sqlite。两个作用：
+#   1. config.zcodeHome 指向它，标题 sidecar（tps-sidecar.mjs）读的是这份假库，
+#      截图里不会出现你真实的会话标题；
+#   2. 截图能落在「元信息首行右列显示会话标题」的样子，而不是无 node 时的 req 计数兜底。
+# 没有 node 时跳过：标题取不到，截图自动退回 req 计数，工具仍然可用。
+$ZHome = Join-Path $Root 'zcode'
+$DbDir = Join-Path $ZHome 'db'
+[void](New-Item -ItemType Directory -Path $DbDir -Force)
+$DbPath = Join-Path $DbDir 'db.sqlite'
+$DemoTitle = '实时显示 TPS 小窗'
+$nodeOk = $false
+try {
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if ($node) {
+    $mk = @"
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(process.argv[1]);
+db.exec('CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, time_updated INTEGER)');
+const ins = db.prepare('INSERT INTO session (id, title, time_updated) VALUES (?, ?, ?)');
+ins.run(process.argv[2], process.argv[3], Date.now());
+ins.run('sess_00000000-0000-4000-8000-000000000001', '另一条演示会话', Date.now() - 600000);
+"@
+    & node -e $mk $DbPath $Sid $DemoTitle 2>&1 | Out-Null
+    $nodeOk = (Test-Path -LiteralPath $DbPath)
+  }
+}
+catch { $nodeOk = $false }
+if ($nodeOk) { Write-Host "  合成 db.sqlite：标题「$DemoTitle」" }
+else { Write-Host '  没找到可用的 node（或 node:sqlite 不可用）：截图将显示 req 计数兜底' }
+
 function Save-Shot {
   param([string]$Language, [string]$Path)
 
   # 语言走 config.json（监控启动时读，见 PORTABILITY.md §2 L2）；
-  # windowTitle 指向不存在的窗口 → 不跟随、不隐藏，截图稳定。
+  # windowTitle 指向不存在的窗口 → 不跟随、不隐藏，截图稳定；
+  # zcodeHome 指向合成目录 → 标题 sidecar 读假库，不碰真实数据。
   $cfg = @{
-    language        = $Language
-    windowTitle     = '___zcode_tps_screenshot_no_such_window___'
+    language         = $Language
+    windowTitle      = '___zcode_tps_screenshot_no_such_window___'
     followForeground = $false
+    zcodeHome        = $ZHome
   } | ConvertTo-Json
   [System.IO.File]::WriteAllText((Join-Path $StateDir 'config.json'), $cfg, $NoBom)
 
