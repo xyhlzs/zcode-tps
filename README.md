@@ -16,8 +16,8 @@
 <p align="center"><sub>生成中：绿点 + 在飞计时 + 亮白数字；柱状图是最近 40 次请求的速率。<br>
 截图由 <a href="tools/capture-overlay.ps1">tools/capture-overlay.ps1</a> 用合成数据生成。</sub></p>
 
-**English quickstart** — Windows 10+ only. Add this repo as a plugin marketplace
-(**Plugin Marketplace → Add → Add Plugin Marketplace**), install *ZCode TPS Monitor*,
+English quickstart: Windows 10+ only. Add this repo as a plugin marketplace
+(Plugin Marketplace → Add → Add Plugin Marketplace), install *ZCode TPS Monitor*,
 then start any task: the overlay appears automatically. Configure via
 `%LOCALAPPDATA%\ZCodeTpsMonitor\config.json` (UI language `auto` / `zh-CN` / `en-US`,
 opacity, ZCode data home, window matching). Stop with `/tps stop`; uninstalling the
@@ -27,7 +27,7 @@ plugin stops and cleans up the watcher automatically.
 
 ## 为什么是这个形态
 
-ZCode 插件系统没有 UI 扩展点——插件只能贡献 skills / commands / hooks / MCP / agents，
+ZCode 插件系统没有 UI 扩展点：插件只能贡献 skills / commands / hooks / MCP / agents，
 manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录但不执行」，所以
 界面内嵌显示做不到。
 
@@ -38,11 +38,11 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 ## 安装
 
 需要 Windows 10 及以上 + 系统自带的 Windows PowerShell 5.1。macOS / Linux 明确不支持
-（小窗是 WinForms + user32 实现），hook 在非 Windows 上会静默退出，不会报错打扰会话。
+（小窗是 WinForms + user32 实现），hook 在非 Windows 上会静默退出，不影响会话。
 
-1. 打开 **插件市场 → 添加 → 添加插件市场**，粘贴本仓库地址。
-2. 到 **个人 → ZCode TPS 监控 → 安装**。
-3. 新开一个任务，小窗随 `SessionStart` 自动出现，无需任何手工步骤。
+1. 打开「插件市场 → 添加 → 添加插件市场」，粘贴本仓库地址。
+2. 到「个人 → ZCode TPS 监控 → 安装」。
+3. 新开一个任务，小窗随 `SessionStart` 自动出现。
 
 本地开发时第 1 步粘贴的是本仓库目录（例如 `D:\dev\zcode-tps`）。详见
 [zcode-tps/README.md § 安装](zcode-tps/README.md#安装)。
@@ -87,7 +87,7 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 - `/tps start` / `/tps stop` 手动启停（`stop` 写哨兵文件，守护进程在一个刷新周期内
   自己退出，不用杀进程）。
 - 关闭窗口：悬停小窗点 `×`，下次 `SessionStart` 会再拉起。
-- **卸载插件**：在 **设置 → 插件管理 → 已安装** 里卸载即可。守护进程每 2 秒检查一次
+- 卸载插件：在「设置 → 插件管理 → 已安装」里卸载即可。守护进程每 2 秒检查一次
   插件目录，目录消失后自动退出并清掉 `%LOCALAPPDATA%\ZCodeTpsMonitor` 下的状态文件。
 
 ## 环境与兼容性
@@ -108,7 +108,7 @@ SQLite provider，所以标题由一个独立的 Node 子进程（`monitor/tps-s
 `off` 表示无头自检模式）。
 
 数据源是两个 ZCode 内部文件，**没有官方 API 保证**，ZCode 升级后字段可能变。脚本对此
-做了优雅降级（界面显示「已读 N 行，0 条可识别」而不是崩溃），但功能可能失效——详见
+做了优雅降级（界面显示「已读 N 行，0 条可识别」而不是崩溃），但功能可能失效，详见
 [zcode-tps/README.md § 数据来源与已知限制](zcode-tps/README.md#数据来源与已知限制)。
 
 ## 文档索引
