@@ -12,6 +12,15 @@
 
 （下一个版本的在制品放这里。）
 
+## [0.3.1] — 2026-09-30
+
+### Fixed
+
+- 消除安装后的加载警告「Duplicate plugin hooks file ignored: ./hooks/hooks.json」：
+  ZCode 插件加载器会自动发现约定路径 `hooks/hooks.json`，plugin.json 再显式声明
+  一遍会被判为重复而忽略（仅警告，hook 本身始终生效）。修复是从 plugin.json 去掉
+  `hooks` 字段，保留约定路径文件不动。
+
 ## [0.3.0] — 2026-09-29
 
 **v2 主体落地**（DESIGN.md §6/§7 全部功能）：在飞估算与多会话并列，直接回应

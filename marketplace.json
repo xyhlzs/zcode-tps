@@ -4,7 +4,7 @@
     {
       "name": "zcode-tps",
       "source": "./zcode-tps",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "description": "实时显示 ZCode 模型生成速率（tok/s）的置顶小窗",
       "displayName": "ZCode TPS Monitor",
       "displayName_i18n": {
