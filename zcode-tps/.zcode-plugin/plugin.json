@@ -1,6 +1,6 @@
 {
   "name": "zcode-tps",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "实时显示 ZCode 模型生成速率（tok/s）的置顶小窗：SessionStart 时拉起守护进程，增量解析 rollout 记录计算 TPS。",
   "author": {
     "name": "xyhlzs"

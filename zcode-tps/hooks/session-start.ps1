@@ -8,8 +8,11 @@
   守护进程是常驻的、单实例的，一旦把目标钉死在 SessionStart 时那个会话，之后切换会话
   就不会跟随了。传会话 id 只适合手动排查。跟随逻辑见 tps-monitor.ps1 的 Resolve-TargetFile。
 
-  -WindowStyle Hidden 作为 powershell.exe 自身的参数传入（而不是 Start-Process 的开关），
-  这样只隐藏控制台，WinForms 窗口照常显示，也避开 STARTUPINFO 首次 ShowWindow 的覆盖。
+  拉起必须用 CreateNoWindow（CREATE_NO_WINDOW），不能用 Start-Process：
+  后者走 ShellExecute，控制台先以可见状态创建、等 PS 启动后才被 -WindowStyle Hidden
+  藏起来——每个会话启动都会闪一次黑框。CREATE_NO_WINDOW 从创建起就无窗口，
+  也不写 STARTUPINFO 的 wShowWindow，WinForms 小窗首次 Show 不受影响；
+  -WindowStyle Hidden 参数保留作兜底。
 #>
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -24,5 +27,10 @@ if (-not (Test-Path -LiteralPath $monitor)) { exit 0 }
 
 $argLine = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$monitor`""
 
-Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = 'powershell.exe'
+$psi.Arguments = $argLine
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+[void][System.Diagnostics.Process]::Start($psi)
 exit 0

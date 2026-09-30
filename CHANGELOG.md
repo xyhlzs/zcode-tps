@@ -12,6 +12,19 @@
 
 （下一个版本的在制品放这里。）
 
+## [0.3.2] — 2026-09-30
+
+### Fixed
+
+- 消除每个新会话启动时闪现的 PowerShell 控制台窗口。SessionStart hook 每次都会
+  拉起一个监控实例（已在跑的靠互斥体自灭），原先用 `Start-Process` 拉起走
+  ShellExecute：控制台先以可见状态创建、等 PowerShell 启动后才被 `-WindowStyle
+  Hidden` 藏起来，这段间隙就是每次会话启动看到的黑框。改为
+  `ProcessStartInfo.CreateNoWindow`（CREATE_NO_WINDOW）拉起：控制台从创建起就
+  无窗口，也不再写 STARTUPINFO 的 `wShowWindow`，WinForms 小窗首次 Show 不受
+  影响（session-start.ps1 原注释里规避的正是这件事）。ZCode 拉起 hook 本身的
+  进程是隐藏的（`windowsHide`），闪的只是脚本内部再拉起的这个。
+
 ## [0.3.1] — 2026-09-30
 
 ### Fixed
