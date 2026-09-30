@@ -971,13 +971,16 @@ function Invoke-RecordCalib {
 }
 
 # ------------------------------------------------------------------ 多会话并列数据层（DESIGN.md §7.2/§7.3）
-# 「猜一个」改成「全都列出来」：活跃会话各行并列、在飞行置顶高亮、上限 5 行折叠。
+# 「猜一个」改成「全都列出来」：活跃会话各行并列、在飞行高亮 + 计时、上限 5 行折叠。
+# 行序稳定（用户反馈）：会话保持首现位置，新会话才插到最上；在飞状态只走高亮
+# 与计时表达，不参与排序——旧实现按 elapsed/lastActiveMs 排，请求起止即重排整列。
 # 单会话/无 sidecar 时退回 v1 紧凑卡片。每行的速率来自各会话自己的 rollout tail。
 
 $script:ActiveWindowMs = 300000    # 活跃窗口：session.time_updated 在最近 5 分钟内
 $script:MaxRows = 5                # 行数上限，超出折叠为 +N
 $script:SessionTails = @{}         # sessionId → 轻量游标与统计（非主目标的活跃会话）
 $script:OverlayRows = @()          # 每拍组装的行数据（渲染与 status.json 共用）
+$script:RowOrder = @()             # 稳定行序：sessionId 按首现顺序，新会话插最上
 $script:MoreRows = 0               # 被折叠的行数
 
 function Get-ActiveSessions {
@@ -1033,7 +1036,7 @@ function Update-SessionTails {
 }
 
 function Get-OverlayRows {
-  # 行数据：在飞行置顶（后开始的在前），空闲行按 lastActiveMs 降序；超出 $MaxRows 折叠。
+  # 行数据：稳定行序（保持首现位置，新会话插最上；在飞只高亮不排序），超出 $MaxRows 折叠。
   # 主目标会话保证在场（哪怕 sidecar 活跃窗口没罩住它）——显示目标可核对是 FR2-3。
   $script:OverlayRows = @()
   $script:MoreRows = 0
@@ -1100,13 +1103,30 @@ function Get-OverlayRows {
       }
     }
 
-    $inFlightRows = @($rows | Where-Object { $_.inFlight } | Sort-Object { $_.elapsed })
-    $idleRows = @($rows | Where-Object { -not $_.inFlight } | Sort-Object lastActiveMs -Descending)
-    $ordered = @($inFlightRows) + @($idleRows)
+    # ---- 稳定行序（用户反馈：行序不应随请求起止/活动时间戳不停切换）----
+    # 旧实现按「在飞 elapsed 升序 + 空闲 lastActiveMs 降序」排序，每个请求开始
+    # （elapsed 归零）或任何会话活动（lastActiveMs 刷新）都会重排整列。改为稳定
+    # 行序：已显示的会话保持首现位置，新出现的会话（新建/恢复/进入活跃窗口）插到
+    # 最上；在飞状态由高亮 + 计时表达（Draw-MultiRows 不变），不再参与排序。
+    $known = @{}
+    foreach ($r in $rows) { $known[$r.sid] = $true }
+    $kept = @($script:RowOrder | Where-Object { $known.ContainsKey($_) })
+    $keptSet = @{}
+    foreach ($sid in $kept) { $keptSet[$sid] = $true }
+    $fresh = @()
+    foreach ($r in $rows) {
+      if (-not $keptSet.ContainsKey($r.sid)) { $fresh += $r.sid; $keptSet[$r.sid] = $true }
+    }
+    $orderedSids = @($fresh) + @($kept)
+    $rank = @{}
+    $i = 0
+    foreach ($sid in $orderedSids) { $rank[$sid] = $i; $i++ }
+    $ordered = @($rows | Sort-Object { $rank[$_.sid] })
     if ($ordered.Count -gt $script:MaxRows) {
       $script:MoreRows = $ordered.Count - $script:MaxRows
       $ordered = @($ordered[0..($script:MaxRows - 1)])
     }
+    $script:RowOrder = $orderedSids
     $script:OverlayRows = $ordered
   } catch {
     $script:OverlayRows = @()

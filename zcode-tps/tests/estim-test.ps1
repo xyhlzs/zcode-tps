@@ -158,6 +158,9 @@ try {
     Check 'B 行速率来自它自己的 rollout tail（200/2s = 100）' `
       ($rowB -and $null -ne $rowB.tps -and [math]::Abs([double]$rowB.tps - 100.0) -lt 0.01) ('tps=' + $rowB.tps)
     Check 'A 行不在飞（请求已完成）' ($rowA -and $rowA.inFlight -eq $false) ('inFlight=' + $rowA.inFlight)
+    Check '行序稳定（A 前 B 后，按首现顺序）' `
+      (@($s.rows)[0].sessionId -eq $SidA -and @($s.rows)[1].sessionId -eq $SidB) `
+      ('rows[0]=' + @($s.rows)[0].sessionId + ' rows[1]=' + @($s.rows)[1].sessionId)
   }
 
   # ------------------------------------------------------------ 场景 4
@@ -175,6 +178,10 @@ try {
   Check 'B 行近期均值（200/2s = 100，在飞行显示 ≈100）' `
     ($rowB -and $null -ne $rowB.avgTps -and [math]::Abs([double]$rowB.avgTps - 100.0) -lt 0.01) `
     ('avgTps=' + $rowB.avgTps)
+  # 稳定行序（用户反馈）：B 在飞也不重排——在飞只走高亮 + 计时，行序保持首现顺序
+  Check 'B 在飞不改变行序（仍 A 前 B 后）' `
+    (@($s.rows)[0].sessionId -eq $SidA -and @($s.rows)[1].sessionId -eq $SidB) `
+    ('rows[0]=' + @($s.rows)[0].sessionId)
 
   # ------------------------------------------------------------ 场景 5
   Write-Host ''
