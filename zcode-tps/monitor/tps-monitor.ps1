@@ -940,7 +940,18 @@ function Invoke-RecordCalib {
   if ($null -eq $r.completedAt -or
     ([DateTime]::UtcNow - $r.completedAt).TotalSeconds -gt 30) { return }
   $base = $script:CalibBase[$sid]
-  if (-not $base -or $base.b0r -lt 0) { return }
+  if (-not $base) { return }
+  # 历史记录（completedAt 早于基线捕获时刻）不消费基线：启动回看会读到基线
+  # 之前落盘的旧请求，它们与基线无增量，吃掉基线会让真实的在飞请求无基线可配
+  # （实测：测试里监控启动前几毫秒写入的记录就踩中这个门槛）。
+  if ($null -ne $r.completedAt -and $r.completedAt -lt $base.utc) { return }
+  # 基线一次性消费：过了上面的门槛，这次配对无论成败都移除，下个请求 started
+  # 时重新捕获。捕获常落在 sidecar 还没看到新 message 的窗口里（基线的
+  # msgId/字节是上一条 message 的），旧实现把失配基线一直留到 600s 兜底清理，
+  # 而 message id 不会重复出现，期间该会话所有请求都配不上——实测 calibN
+  # 恒 0 的第二个原因。
+  $script:CalibBase.Remove($sid)
+  if ($base.b0r -lt 0) { return }
   $cur = $null
   foreach ($ss in $script:SidecarSessions) { if ($ss.id -eq $sid) { $cur = $ss; break } }
   if (-not $cur -or -not $cur.parts) { return }
@@ -948,21 +959,15 @@ function Invoke-RecordCalib {
   if ([string]$cur.msgId -ne [string]$base.msgId) { return }
   $dR = [long]$cur.parts.reasoning - [long]$base.b0r
   $dX = [long]$cur.parts.text - [long]$base.b0x
-  # 小样本噪声大：增量计数低于阈值不标定。基线只在真正配对成功后才消费——
-  # 启动回读的历史记录（字节与基线无增量）不构成有效配对，不能把基线吃掉，
-  # 否则真实的在飞请求完成时反而无基线可配（600s 兜底清理防残留）。
-  $added = $false
+  # 小样本噪声大：增量计数低于阈值不标定
   if ($dR -ge 300) {
     Add-CalibSample -Type 'reasoning' -Tok ([double]$r.reasoningTokens) -Bytes ([double]$dR)
-    $added = $true
   }
   if ($dX -ge 300) {
     # outputTokens 含工具调用 token 而 tool part 不参与换算，text 类系数会略偏高；
     # A4（±20%）门槛下可接受，DESIGN.md §12 已记录
     Add-CalibSample -Type 'text' -Tok ([double]($r.outputTokens - $r.reasoningTokens)) -Bytes ([double]$dX)
-    $added = $true
   }
-  if ($added) { $script:CalibBase.Remove($sid) }
 }
 
 # ------------------------------------------------------------------ 多会话并列数据层（DESIGN.md §7.2/§7.3）
@@ -1054,14 +1059,21 @@ function Get-OverlayRows {
       $tps = $null
       $tpsAt = $null
       $out = 0
+      $avg = $null
       if ($sid -eq $script:Stats.sessionId) {
         $tps = $script:Stats.lastTps
         $tpsAt = $script:Stats.lastAtUtc
         $out = $script:Stats.sessOut
+        $avg = Get-SessTps
       }
       else {
         $t = $script:SessionTails[$sid]
-        if ($t) { $tps = $t.lastTps; $tpsAt = $t.lastAtUtc; $out = $t.sessOut }
+        if ($t) {
+          $tps = $t.lastTps
+          $tpsAt = $t.lastAtUtc
+          $out = $t.sessOut
+          if ($t.sessMs -gt 0) { $avg = $t.sessOut / ($t.sessMs / 1000.0) }
+        }
       }
       $inFl = Test-SessionInFlight -SessionId $sid
       $elapsed = $null
@@ -1081,6 +1093,7 @@ function Get-OverlayRows {
         tps          = $tps
         tpsAt        = $tpsAt
         out          = $out
+        avg          = $avg
         inFlight     = $inFl
         elapsed      = $elapsed
         estim        = $estim
@@ -1163,6 +1176,7 @@ function Write-Status {
             sessionId  = $_.sid
             title      = $_.title
             tps        = $_.tps
+            avgTps     = $_.avg
             inFlight   = $_.inFlight
             elapsedSec = $_.elapsed
             estimTps   = $_.estim
@@ -1552,17 +1566,34 @@ function Draw-MultiRows {
       $g.FillRectangle($script:Brushes.rowHi, [single](Px 6), ($y - [single](Px 2)),
         [single]($script:MultiW - (Px 12)), [single]($rowH - (Px 3)))
     }
-    # 速率列（右对齐）：先定位，标题的可用宽度要让位给它
+    # 速率列（右对齐）：先定位，标题的可用宽度要让位给它。
+    # 在飞且无实测估算（L3 窗口内落库不足）时，显示该会话近期请求均值的 ≈
+    # （估算色）而不是旧真值——请求中途没有任何数据源（DESIGN.md §3.1 修订），
+    # 亮白的旧真值会被读成实时速率，单请求 7–150s 纹丝不动像坏了（FR1-4）。
     $rateText = '—'
     $rateBrush = $script:Brushes.faint
     if ($null -ne $r.estim) {
       $rateText = '≈{0:N0}' -f [double]$r.estim
       $rateBrush = $script:Brushes.estim
     }
+    elseif ($r.inFlight) {
+      # 2.5s 内刚完成过一个请求（工具循环里完成→下一请求无缝衔接）：真值还在
+      # 新鲜期，亮白显示，保留「完成即刷新」的可见性
+      $fresh = $false
+      if ($r.tpsAt) { $fresh = (([DateTime]::UtcNow - $r.tpsAt).TotalSeconds -lt 2.5) }
+      if ($fresh -and $null -ne $r.tps) {
+        $rateText = '{0:N1}' -f [double]$r.tps
+        $rateBrush = $script:Brushes.ink
+      }
+      elseif ($null -ne $r.avg -and [double]$r.avg -gt 0) {
+        $rateText = '≈{0:N1}' -f [double]$r.avg
+        $rateBrush = $script:Brushes.estim
+      }
+      # 连均值都没有（该会话还没有完成过请求）：保持 '—'，不发明数字
+    }
     elseif ($null -ne $r.tps) {
       $rateText = '{0:N1}' -f [double]$r.tps
-      if ($r.inFlight) { $rateBrush = $script:Brushes.ink }
-      else { $rateBrush = $script:Brushes.sub }
+      $rateBrush = $script:Brushes.sub
     }
     $rateSize = $g.MeasureString($rateText, $script:Fonts.rowNum)
     $unitSize = $g.MeasureString($script:Str.unit, $script:Fonts.unit)
@@ -1650,12 +1681,23 @@ $form.Add_Paint({
     $txt = '—'
     if ($hasData -and -not $hasError) { $txt = '{0:N1}' -f $script:Stats.lastTps }
     # 在飞且估算在场（L3，DESIGN.md §6）：主数字让位给 ≈估算（琥珀色），
-    # 真值在请求结束落盘后回落覆盖。窗口内落库不足 2 次时估算为空，只留计时。
+    # 真值在请求结束落盘后回落覆盖。窗口内落库不足 2 次时估算为空：
+    # 若 2.5s 内刚完成过请求（$recent），真值还在新鲜期，保持亮白；
+    # 否则让位给本会话近期均值的 ≈——请求中途没有任何数据源（§3.1 修订），
+    # 旧真值亮白会被读成实时速率，单请求 7–150s 纹丝不动像坏了。
     if ($inFlight -and -not $hasError) {
       $estimMain = Get-EstimTps -SessionId $script:Stats.sessionId
       if ($null -ne $estimMain) {
         $txt = '≈{0:N0}' -f $estimMain
         $numBrush = $script:Brushes.estim
+      }
+      elseif (-not $recent) {
+        $avgMain = Get-SessTps
+        if ($null -ne $avgMain -and $avgMain -gt 0) {
+          $txt = '≈{0:N1}' -f $avgMain
+          $numBrush = $script:Brushes.estim
+        }
+        else { $numBrush = $script:Brushes.sub }
       }
     }
     $numX = Px 26; $numY = Px 0

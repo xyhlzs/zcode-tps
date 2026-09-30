@@ -8,6 +8,8 @@
        在飞估算随之消失（不在飞不出估算），主数字回落真值
     3  多会话并列：两个活跃会话各成一行，空闲行的速率来自它自己的 rollout tail
     4  无依据不出数字：计数恒定（没有落库）的会话在飞也不显示估算（FR1-4）
+    5  标定基线失配被丢弃：捕获竞态留下的旧 message 基线不滞留，下个请求
+       重新捕获并标定成功（calibN 继续增长）
 
   用法：powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\estim-test.ps1
   退出码：0 = 全部通过，1 = 有失败。
@@ -52,13 +54,13 @@ function Add-Rollout {
 }
 
 function Write-Snap {
-  param([long]$rA, [long]$xA, [long]$rB, [long]$xB)
+  param([long]$rA, [long]$xA, [long]$rB, [long]$xB, [string]$MsgA = 'msg_a')
   $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $snap = @{
     t        = $now
     titles   = @{ $SidA = '合成会话A'; $SidB = '并发会话B' }
     sessions = @(
-      @{ id = $SidA; title = '合成会话A'; lastActiveMs = $now; msgId = 'msg_a'; msgSeq = 1;
+      @{ id = $SidA; title = '合成会话A'; lastActiveMs = $now; msgId = $MsgA; msgSeq = 1;
          parts = @{ reasoning = $rA; text = $xA; other = 100 } },
       @{ id = $SidB; title = '并发会话B'; lastActiveMs = $now; msgId = 'msg_b'; msgSeq = 2;
          parts = @{ reasoning = $rB; text = $xB; other = 0 } }
@@ -168,6 +170,35 @@ try {
   $rowB = @($s.rows) | Where-Object { $_.sessionId -eq $SidB }
   Check 'B 在飞（L1 计时工作）' ($rowB -and $rowB.inFlight -eq $true) ('inFlight=' + $rowB.inFlight)
   Check 'B 无估算（计数恒定，落库 0 次）' ($rowB -and $null -eq $rowB.estimTps) ('estim=' + $rowB.estimTps)
+  # 在飞且无估算时行内显示 ≈近期均值（§3.1 修订：请求中途无数据源，旧真值
+  # 亮白会被读成实时速率）。B 的会话均值 = 200 tok ÷ 2s = 100。
+  Check 'B 行近期均值（200/2s = 100，在飞行显示 ≈100）' `
+    ($rowB -and $null -ne $rowB.avgTps -and [math]::Abs([double]$rowB.avgTps - 100.0) -lt 0.01) `
+    ('avgTps=' + $rowB.avgTps)
+
+  # ------------------------------------------------------------ 场景 5
+  Write-Host ''
+  Write-Host '场景 5：基线失配被丢弃——下个请求重新捕获并标定成功'
+  # 复现捕获竞态：started 时快照还停在上一条 message（msgId 不同，字节也对不上）。
+  # 旧实现把失配基线留到 600s 兜底清理，message id 不会重复出现，期间该会话
+  # 所有请求都配不上（calibN 冻结）。新实现基线一次性消费：失配即丢弃。
+  Write-Snap 3000 2000 800 300 -MsgA 'msg_old'
+  Add-Log 'model.request.started' $SidA          # 捕获基线（msg_old，字节 3000/2000）
+  Start-Sleep -Milliseconds 600
+  Write-Snap 4000 2500 800 300 -MsgA 'msg_new'   # 新 message 落库（msgId 变了）
+  Add-Log 'model.request.completed' $SidA        # msgId 失配 → 基线被丢弃
+  Add-Rollout -Session $SidA -Out 300 -Ms 2000 -Reasoning 100
+  Start-Sleep -Milliseconds 600
+  Write-Snap 4000 2500 800 300 -MsgA 'msg_new'   # 保持 msg_new 不变
+  Add-Log 'model.request.started' $SidA          # 重新捕获（msg_new，字节 4000/2500）
+  Start-Sleep -Milliseconds 600
+  Write-Snap 4500 3000 800 300 -MsgA 'msg_new'   # 生成中，字节增长
+  Start-Sleep -Milliseconds 600
+  Add-Log 'model.request.completed' $SidA        # 同 msgId，增量 500 ≥ 300 → 标定
+  Add-Rollout -Session $SidA -Out 300 -Ms 2000 -Reasoning 100
+  $s = Wait-Status { param($x) $x.calibTextN -ge 2 } -TimeoutMs 8000
+  Check '失配基线被丢弃后重新捕获并标定（calibTextN ≥ 2）' ($null -ne $s) `
+    (Show-Status (Get-Status))
 }
 finally {
   if ($mon -and -not $mon.HasExited) { Stop-Process -Id $mon.Id -Force -ErrorAction SilentlyContinue }
