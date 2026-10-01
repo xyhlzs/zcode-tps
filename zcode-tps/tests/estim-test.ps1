@@ -117,6 +117,14 @@ try {
     '-Headless', '-Seconds', '120', '-LogDir', $LogDir, '-RolloutDir', $RolloutDir, '-StateDir', $StateDir)
 
   # ------------------------------------------------------------ 场景 1
+  # 监控子进程冷启动在慢机器（CI）上要 2~3s：不等首拍就开写递增快照，基线
+  # 捕获与估算窗口都会从最终值起算，两次落库永远凑不齐。status.json 出现且
+  # 在飞成立 = 首拍已回看日志（基线已捕获）并读过快照，之后的变化才可观察。
+  Write-Host ''
+  Write-Host '场景 0：等待监控首拍就绪'
+  $s = Wait-Status { param($x) $x.inFlight -eq $true -and @($x.rows).Count -ge 1 } -TimeoutMs 15000
+  Check '监控首拍就绪（基线已捕获，快照已读）' ($null -ne $s) (Show-Status (Get-Status))
+
   Write-Host ''
   Write-Host '场景 1：快照计数两次增长 → 在飞估算出现（FR1-3）'
   Start-Sleep -Milliseconds 1500
