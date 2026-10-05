@@ -116,13 +116,24 @@ try {
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Monitor,
     '-Headless', '-Seconds', '120', '-LogDir', $LogDir, '-RolloutDir', $RolloutDir, '-StateDir', $StateDir)
 
-  # ------------------------------------------------------------ 场景 1
-  # 监控子进程冷启动在慢机器（CI）上要 2~3s：不等首拍就开写递增快照，基线
-  # 捕获与估算窗口都会从最终值起算，两次落库永远凑不齐。status.json 出现且
-  # 在飞成立 = 首拍已回看日志（基线已捕获）并读过快照，之后的变化才可观察。
+  # ------------------------------------------------------------ 场景 0
+  # 监控子进程冷启动在慢机器（CI）上可达 5s+，而快照保鲜期只有 3s（DESIGN.md §9
+  # 的死 sidecar 防御）：初始快照只写一次，首拍读到时可能已过期被拒，之后估算/
+  # 标定/行序全部失去数据来源（2026-10-05 CI 实测：estim=—、calibN=0、行序变
+  # [B,A]，本地快机器永远复现不了）。所以等待循环里持续重写同一份初始快照保鲜，
+  # 就绪判据用 rows≥2：B 行只能来自快照，rows≥2 才证明快照已被读到——旧的
+  # rows≥1 用「意图指向的手动行」就能满足，证明不了（这正是上一轮竞态修复
+  # 1e6234d 的漏网之处）。
   Write-Host ''
   Write-Host '场景 0：等待监控首拍就绪'
-  $s = Wait-Status { param($x) $x.inFlight -eq $true -and @($x.rows).Count -ge 1 } -TimeoutMs 15000
+  $s = $null
+  $gateDeadline = (Get-Date).AddSeconds(20)
+  while ((Get-Date) -lt $gateDeadline) {
+    Write-Snap 1000 500 800 300                   # 同值重写：只保鲜，不改计数
+    $s = Get-Status
+    if ($s -and $s.inFlight -eq $true -and @($s.rows).Count -ge 2) { break }
+    Start-Sleep -Milliseconds 250
+  }
   Check '监控首拍就绪（基线已捕获，快照已读）' ($null -ne $s) (Show-Status (Get-Status))
 
   Write-Host ''
