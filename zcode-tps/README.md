@@ -33,8 +33,10 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 
 ## 显示内容
 
-深色小窗（#1A1D22，视觉方案见 VISUAL.md），「数字即界面」：大号等宽数字是唯一的
-主角，其余信息以小号灰字收在下方，彩色只在表达状态时出现。
+小窗默认**跟随 Windows 系统的深浅色模式**（系统切换明暗后约 2 秒内自动换肤；
+也可用 `-Theme dark / light` 或 config 固定），布局与状态语义两套主题完全一致。
+「数字即界面」：大号等宽数字是唯一的主角，其余信息以小号灰字收在下方，
+彩色只在表达状态时出现。视觉方案见 VISUAL.md（深色 §3.1、浅色 §8.2）。
 
 速率数字分两层，诚实度不同、看得出来：
 
@@ -80,13 +82,14 @@ manifest 里的 `channels`、`outputStyles`、`settings` 等字段是「记录�
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `language` | `"auto"` | 界面语言：`auto` 跟随系统（zh 开头中文、其余英文），或 `zh-CN` / `en-US` |
+| `theme` | `"auto"` | 界面明暗：`auto` 跟随 Windows 深浅色模式（运行中自动跟随切换），或 `dark` / `light` 固定 |
 | `opacity` | `0.85` | 0.3–1.0 |
 | `zcodeHome` | `""` | ZCode 数据目录；空 = `%USERPROFILE%\.zcode\cli` |
 | `windowTitle` | `"ZCode"` | ZCode 主窗口匹配：窗口标题 |
 | `windowProcess` | `"ZCode"` | ZCode 主窗口匹配：进程名（安装渠道不同可能不同） |
 | `followForeground` | `true` | `false` = ZCode 不在前台时小窗也保持显示 |
 
-命令行参数优先于配置文件（排查时可临时覆盖）。深色主题是设计决定，不开放配置。
+命令行参数优先于配置文件（排查时可临时覆盖），对应 `-Theme dark / light / auto`。
 
 ## 会话跟随
 
@@ -211,6 +214,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 | `pluginRoot` | 监控脚本所属的插件根目录；`/tps start` 用它定位脚本，卸载毒丸盯的是它的消失 |
 | `waiting` | 归属已切到某个会话但它还没有生成数据（窗口显示「该会话暂无生成数据」） |
 | `zcodeWin` | ZCode 主窗口状态：`normal` / `minimized` / `hidden`（不在前台，小窗已隐藏）/ `closed` / `none`（`none`=没找到，不跟随） |
+| `theme` | 当前生效的界面主题：`dark` / `light`（auto 模式实时跟随系统明暗） |
 | `desiredSession` | 用户意图指向的会话；为空说明还没抓到 `turn.started` / `session.resumed` |
 | `intentAtUtc` / `intentAgeMs` / `intentTtlMs` | 该意图的日志时间戳、已过时长、有效期。排查「显示为什么没跟着我切」先看这三个 |
 | `requests` / `skipped` | 认出的记录数 / 读到但没认出的行数 |
@@ -218,7 +222,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 
 - `requests = 0` 且 `skipped > 0`：读到行但字段没认出来，说明 ZCode 改了格式。
 - 想验证跟随逻辑，用 `-LogDir` / `-RolloutDir` / `-StateDir` 指向合成目录做受控测试，
-  或直接跑现成的回归测试（CI 里同样跑这三条）：
+  或直接跑现成的回归测试（CI 里同样跑这四条）：
 
   ```powershell
   # 会话跟随：6 个场景 15 项断言
@@ -226,6 +230,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File monitor\tps-monitor.ps1 
 
   # L3 估算 + 多会话数据层：4 个场景 15 项断言
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\estim-test.ps1
+
+  # 主题解析：auto 跟随系统注册表、命令行 > 配置、非法值回落
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\theme-test.ps1
 
   # sidecar 数据契约：node 直接跑（需要 node >= 22.5）
   node tests\sidecar-test.mjs

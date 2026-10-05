@@ -9,20 +9,21 @@
 所在的会话。
 
 <p align="center">
-  <img src="docs/images/overlay-zh.png" alt="TPS 小窗（中文）" width="324">
+  <img src="docs/images/overlay-zh.png" alt="TPS 小窗·深色（中文）" width="324">
   &nbsp;&nbsp;
-  <img src="docs/images/overlay-multi-zh.png" alt="TPS 小窗·多行并列（中文）" width="324">
+  <img src="docs/images/overlay-light-zh.png" alt="TPS 小窗·浅色（中文）" width="324">
 </p>
 
-<p align="center"><sub>左：生成中——琥珀色 ≈ 估算（在飞）+ 计时 + 最近 40 次请求柱状图；<br>
-右：并发多任务——活跃会话各占一行，在飞行置顶高亮，空闲行各显各的速率。<br>
+<p align="center"><sub>左：深色主题（生成中——琥珀色 ≈ 估算 + 计时 + 最近 40 次请求柱状图）；<br>
+右：浅色主题——视觉风格跟随 Windows 系统的深浅色模式，系统切换后约 2 秒内自动换肤。<br>
 截图由 <a href="tools/capture-overlay.ps1">tools/capture-overlay.ps1</a> 用合成数据生成。</sub></p>
 
 English quickstart: Windows 10+ only. Add this repo as a plugin marketplace
 (Plugin Marketplace → Add → Add Plugin Marketplace), install *ZCode TPS Monitor*,
 then start any task: the overlay appears automatically. Configure via
 `%LOCALAPPDATA%\ZCodeTpsMonitor\config.json` (UI language `auto` / `zh-CN` / `en-US`,
-opacity, ZCode data home, window matching). Stop with `/tps stop`; uninstalling the
+theme `auto` / `dark` / `light` — auto follows the Windows app mode, opacity,
+ZCode data home, window matching). Stop with `/tps stop`; uninstalling the
 plugin stops and cleans up the watcher automatically.
 
 ---
@@ -41,10 +42,11 @@ plugin stops and cleans up the watcher automatically.
 
 ## 你会看到什么
 
-深色小窗：大号等宽数字是唯一的主角，其余信息以小号灰字收在下方，
-彩色只在表达状态时出现。速率数字分两层：**真值**（白/灰）是最近一次请求的
-`outputTokens ÷ durationMs`；**估算**（琥珀色 `≈`）在生成过程中按当前消息字节
-增量 × 标定系数实时推算，请求结束即被真值覆盖——没有依据时不出估算。
+小窗默认**跟随 Windows 系统的深浅色模式**（深浅两套配色同一布局），大号等宽数字是
+唯一的主角，其余信息以小号灰字收在下方，彩色只在表达状态时出现。速率数字分两层：
+**真值**（亮/灰）是最近一次请求的 `outputTokens ÷ durationMs`；**估算**（琥珀色
+`≈`）在生成过程中按当前消息字节增量 × 标定系数实时推算，请求结束即被真值覆盖——
+没有依据时不出估算。
 
 | 位置 | 含义 |
 |---|---|
@@ -69,13 +71,14 @@ plugin stops and cleans up the watcher automatically.
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `language` | `"auto"` | 界面语言：`auto` 跟随系统，或 `zh-CN` / `en-US` |
+| `theme` | `"auto"` | 界面明暗：`auto` 跟随 Windows 深浅色模式（运行中自动跟随切换），或 `dark` / `light` 固定 |
 | `opacity` | `0.85` | 0.3–1.0 |
 | `zcodeHome` | `""` | ZCode 数据目录；空 = `%USERPROFILE%\.zcode\cli` |
 | `windowTitle` | `"ZCode"` | ZCode 主窗口匹配：窗口标题 |
 | `windowProcess` | `"ZCode"` | ZCode 主窗口匹配：进程名（安装渠道不同可能不同） |
 | `followForeground` | `true` | `false` = ZCode 不在前台时小窗也保持显示 |
 
-命令行参数优先于配置文件，便于排查时临时覆盖。
+命令行参数优先于配置文件，便于排查时临时覆盖（对应 `-Theme dark / light / auto`）。
 
 ## 启停与卸载
 

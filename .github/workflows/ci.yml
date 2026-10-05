@@ -60,3 +60,7 @@ jobs:
       - name: 会话跟随回归测试
         shell: pwsh
         run: ./zcode-tps/tests/follow-test.ps1
+
+      - name: 主题解析测试（auto 跟随系统深浅色）
+        shell: pwsh
+        run: ./zcode-tps/tests/theme-test.ps1

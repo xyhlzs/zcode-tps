@@ -62,6 +62,7 @@
 ```json
 {
   "language": "auto",          // auto | zh-CN | en-US
+  "theme": "auto",             // auto 跟随系统深浅 | dark | light
   "opacity": 0.85,             // 0.3-1.0
   "zcodeHome": "",             // 空 = 默认 %USERPROFILE%\.zcode\cli
   "windowTitle": "ZCode",      // ZCode 窗口匹配（标题）
@@ -70,8 +71,8 @@
 }
 ```
 
-原则：**只放「不同用户会真的不同」的项**。主题（深色）是设计决定，不开放；
-位置已有 pos.txt；轮询间隔之类调参项走命令行（测试用），不进配置。
+原则：**只放「不同用户会真的不同」的项**。深浅主题跟随系统是默认行为，
+只有想固定某一面时才配 `theme`；位置已有 pos.txt；轮询间隔之类调参项走命令行（测试用），不进配置。
 
 ### L3 界面文案 i18n
 

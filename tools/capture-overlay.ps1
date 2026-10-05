@@ -3,6 +3,8 @@
   生成 README 用的小窗截图（开发工具，位于插件目录之外，不随插件分发）。
 
   做法：用合成数据起一个 -Opacity 1 的监控实例，再把小窗单独抓成 PNG。
+  机器上可能正跑着真实的监控（插件安装版）：合成实例带 -NoMutex 与它并存，
+  找窗口时用「标题 + 进程 PID」双重匹配，保证抓的是自己拉起的实例。
   两点刻意的选择：
 
     * 抓取走 PrintWindow（按窗口句柄渲染），不是抓屏幕——所以截图里不会带进
@@ -15,7 +17,8 @@
   窗口稳定可见（PORTABILITY.md 验收矩阵 P8 的场景），截图不会因为前台切换而抓空。
 
   用法：powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\capture-overlay.ps1
-  产物：docs\images\overlay-zh.png、docs\images\overlay-en.png
+  产物：docs\images\overlay-zh.png、docs\images\overlay-en.png，
+        以及浅色主题的 overlay-light-*.png / overlay-multi-light-*.png（VISUAL.md §8）
 #>
 [CmdletBinding()]
 param(
@@ -43,24 +46,33 @@ Add-Type -Namespace TpsShot -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
 public delegate bool EnumProc(IntPtr h, IntPtr p);
 public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 '@
 [void][TpsShot.Native]::SetProcessDPIAware()
 
-# 按标题找小窗。这里刻意不用 FindWindow：PowerShell 把 $null 绑定到 string 形参时
-# 传的是空串而不是 NULL，FindWindow(null, title) 会去找「类名为空」的窗口，恒返回 0
+# 找小窗：标题匹配 + 进程 PID 匹配（双重条件）。只按标题找是不够的——这台机器
+# 可能正跑着一个真实的监控（插件安装版，窗口标题同为 ZCode TPS），两个同标题
+# 置顶窗在 z 序里竞争，谁先被枚举到就抓谁，抓错窗口就会出现「尺寸是一个窗口、
+# 内容是另一个」的错位截图。截图进程知道自己拉起的监控 PID，用它做精确匹配。
+# 这里刻意不用 FindWindow：PowerShell 把 $null 绑定到 string 形参时传的是空串
+# 而不是 NULL，FindWindow(null, title) 会去找「类名为空」的窗口，恒返回 0
 # （2026-09-29 实测）。EnumWindows + GetWindowText 精确比较没有这个坑。
 function Find-TpsWindow {
-  param([string]$Title)
+  param([string]$Title, [int]$ProcessId)
   $script:FoundHwnd = [IntPtr]::Zero
   $cb = [TpsShot.Native+EnumProc] {
     param([IntPtr]$h, [IntPtr]$p)
     $sb = New-Object System.Text.StringBuilder 256
     [void][TpsShot.Native]::GetWindowText($h, $sb, 256)
-    if ($sb.ToString() -eq $Title) { $script:FoundHwnd = $h; return $false }
-    return $true
+    if ($sb.ToString() -ne $Title) { return $true }
+    [uint32]$owner = 0
+    [void][TpsShot.Native]::GetWindowThreadProcessId($h, [ref]$owner)
+    if ($ProcessId -gt 0 -and [int]$owner -ne $ProcessId) { return $true }
+    $script:FoundHwnd = $h
+    return $false
   }
   [void][TpsShot.Native]::EnumWindows($cb, [IntPtr]::Zero)
   return $script:FoundHwnd
@@ -194,13 +206,14 @@ if ($nodeOk) { Write-Host "  合成 db.sqlite：标题「$DemoTitle」" }
 else { Write-Host '  没找到可用的 node（或 node:sqlite 不可用）：截图将显示 req 计数兜底' }
 
 function Save-Shot {
-  param([string]$Language, [string]$Path)
+  param([string]$Language, [string]$Path, [string]$ThemeName = 'dark')
 
-  # 语言走 config.json（监控启动时读，见 PORTABILITY.md §2 L2）；
+  # 语言/主题走 config.json（监控启动时读，见 PORTABILITY.md §2 L2）；
   # windowTitle 指向不存在的窗口 → 不跟随、不隐藏，截图稳定；
   # zcodeHome 指向合成目录 → 标题 sidecar 读假库，不碰真实数据。
   $cfg = @{
     language         = $Language
+    theme            = $ThemeName
     windowTitle      = '___zcode_tps_screenshot_no_such_window___'
     followForeground = $false
     zcodeHome        = $ZHome
@@ -209,14 +222,14 @@ function Save-Shot {
 
   $mon = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Monitor,
-    '-Opacity', '1', '-NoWatchdog',
+    '-Opacity', '1', '-NoWatchdog', '-NoMutex',
     '-LogDir', $LogDir, '-RolloutDir', $RolloutDir, '-StateDir', $StateDir
   )
   try {
     $hwnd = [IntPtr]::Zero
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
-      $hwnd = Find-TpsWindow -Title 'ZCode TPS'
+      $hwnd = Find-TpsWindow -Title 'ZCode TPS' -ProcessId $mon.Id
       if ($hwnd -ne [IntPtr]::Zero) { break }
       Start-Sleep -Milliseconds 200
     }
@@ -291,6 +304,10 @@ const t = setInterval(() => {
   Save-Shot -Language 'zh-CN' -Path (Join-Path $OutDir 'overlay-zh.png')
   Save-Shot -Language 'en-US' -Path (Join-Path $OutDir 'overlay-en.png')
 
+  # 浅色主题（VISUAL.md §8）：同一份合成数据，只换 config.theme
+  Save-Shot -Language 'zh-CN' -ThemeName 'light' -Path (Join-Path $OutDir 'overlay-light-zh.png')
+  Save-Shot -Language 'en-US' -ThemeName 'light' -Path (Join-Path $OutDir 'overlay-light-en.png')
+
   # ------------------------------------------------------------ 多行模式（DESIGN.md §7.2）
   # 往合成 db 里再加两个活跃会话（各带 rollout 真值）→ 界面切到多行并列：
   # 在飞行（主会话）置顶高亮、≈估算 + 计时；空闲行各显各的速率。
@@ -337,6 +354,8 @@ try {
 
     Save-Shot -Language 'zh-CN' -Path (Join-Path $OutDir 'overlay-multi-zh.png')
     Save-Shot -Language 'en-US' -Path (Join-Path $OutDir 'overlay-multi-en.png')
+    Save-Shot -Language 'zh-CN' -ThemeName 'light' -Path (Join-Path $OutDir 'overlay-multi-light-zh.png')
+    Save-Shot -Language 'en-US' -ThemeName 'light' -Path (Join-Path $OutDir 'overlay-multi-light-en.png')
   }
   else {
     Write-Host '  无 node：跳过多行截图（需要 sidecar 提供活跃会话）'

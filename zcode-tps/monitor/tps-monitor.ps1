@@ -54,6 +54,7 @@
     powershell.exe ... -File tps-monitor.ps1 -Headless -Seconds 10   # 无窗自检，写 status.json
     powershell.exe ... -File tps-monitor.ps1 -SessionId sess_xxx     # 手动钉死某个会话
     powershell.exe ... -File tps-monitor.ps1 -Opacity 0.85   # 窗口不透明度（0.3-1.0，默认 0.85）
+    powershell.exe ... -File tps-monitor.ps1 -Theme light    # 界面主题（auto|dark|light，默认 auto 跟随系统深浅色）
 
   -LogDir / -RolloutDir / -StateDir / -IntentTtlMs 是给受控测试用的隔离与调参开关，
   见 tests\follow-test.ps1；日常运行不要传。
@@ -67,13 +68,18 @@ param(
   [switch]$Headless,
   [int]$Seconds = 0,
   [double]$Opacity = 0.85,
+  # 界面主题：auto（跟随 Windows 深浅色，默认）| dark | light，见 VISUAL.md §8
+  [string]$Theme = 'auto',
   # 用户意图的有效期（毫秒）。默认 10 分钟，与 ZCode 回收空闲会话运行时的
   # resident idle 超时（实测 600000ms）一致：这段时间内该会话仍「活着」，
   # 超过后用户多半已经离开，才允许回落到「谁在生成就显示谁」。
   [int]$IntentTtlMs = 600000,
   # 跳过卸载毒丸（PORTABILITY.md §2 L4-1）。给受控测试用：测试副本放在临时目录
   # 时目录被清会误杀监控。日常运行不要传。
-  [switch]$NoWatchdog
+  [switch]$NoWatchdog,
+  # 跳过单实例互斥体。给截图工具用：机器上可能正跑着真实监控（持有互斥体），
+  # 合成实例需要与它并存才能被独立截取。日常运行不要传。
+  [switch]$NoMutex
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,6 +115,7 @@ $script:TearDown = $false            # 毒丸清理后关闭窗口时不再回�
 
 $script:Cfg = @{
   language         = 'auto'      # auto | zh-CN | en-US
+  theme            = 'auto'      # auto | dark | light（VISUAL.md §8：跟随系统明暗）
   opacity          = $null       # $null = 未配置，用内置默认
   zcodeHome        = ''          # 空 = %USERPROFILE%\.zcode\cli
   windowTitle      = 'ZCode'     # ZCode 主窗口匹配：标题
@@ -119,6 +126,7 @@ try {
   if (Test-Path -LiteralPath $ConfigFile) {
     $raw = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($raw.language) { $script:Cfg.language = [string]$raw.language }
+    if ($raw.theme) { $script:Cfg.theme = [string]$raw.theme }
     if ($null -ne $raw.opacity) { $script:Cfg.opacity = [double]$raw.opacity }
     if ($raw.zcodeHome) { $script:Cfg.zcodeHome = [string]$raw.zcodeHome }
     if ($raw.windowTitle) { $script:Cfg.windowTitle = [string]$raw.windowTitle }
@@ -131,6 +139,40 @@ try {
 if (-not $PSBoundParameters.ContainsKey('Opacity') -and $null -ne $script:Cfg.opacity) {
   $Opacity = [Math]::Min(1.0, [Math]::Max(0.3, $script:Cfg.opacity))
 }
+
+# ------------------------------------------------------------------ 主题模式
+# 三档：auto（跟随 Windows 深浅色，默认）/ dark / light。命令行 -Theme > config.theme。
+# 非法值回落 auto——与 Opacity「钳制而不是报错」同一哲学，不给启动失败的理由。
+$script:ThemeMode = 'auto'
+$themeWant = [string]$script:Cfg.theme
+if ($PSBoundParameters.ContainsKey('Theme')) { $themeWant = [string]$Theme }
+$themeWant = $themeWant.Trim().ToLowerInvariant()
+if ($themeWant -eq 'dark' -or $themeWant -eq 'light') { $script:ThemeMode = $themeWant }
+
+function Get-SystemThemeName {
+  # Windows 应用模式开关：HKCU\...\Themes\Personalize\AppsUseLightTheme，1=浅色 0=深色。
+  # 键不存在（精简安装/服务器 SKU/受限模式）默认深色——即 0.3.x 的原方案，向后兼容。
+  # 用 Registry API 而不是 Get-ItemProperty：运行中每 2 秒复读一次，不值得走 cmdlet 开销。
+  try {
+    $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+      'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize')
+    if ($k) {
+      $v = $k.GetValue('AppsUseLightTheme')
+      $k.Close()
+      if ($v -is [int] -and $v -eq 1) { return 'light' }
+    }
+  } catch { }
+  return 'dark'
+}
+
+function Resolve-ThemeName {
+  # 用户要求的模式 → 生效主题：显式 dark/light 原样返回；auto 实时探测系统当前值。
+  if ($script:ThemeMode -eq 'light') { return 'light' }
+  if ($script:ThemeMode -eq 'dark') { return 'dark' }
+  return Get-SystemThemeName
+}
+
+$script:ThemeName = ''              # 当前生效 'dark' | 'light'（Build-Theme 维护；无头模式下直接赋值）
 
 $ZCodeHome = Join-Path $env:USERPROFILE '.zcode\cli'
 if ($script:Cfg.zcodeHome) { $ZCodeHome = $script:Cfg.zcodeHome }
@@ -1177,6 +1219,7 @@ function Write-Status {
       target              = $script:Stats.target
       source              = $script:Stats.source
       zcodeWin            = $script:ZCodeState
+      theme               = $script:ThemeName
       pluginRoot          = $script:PluginRoot
       desiredSession      = $script:DesiredSession
       intentAtUtc         = $intentAt
@@ -1240,7 +1283,7 @@ function Write-Status {
 
 # ------------------------------------------------------------------ 单实例
 
-if (-not $Headless) {
+if (-not $Headless -and -not $NoMutex) {
   $createdNew = $false
   $script:Mutex = [System.Threading.Mutex]::new($true, 'Local\ZCodeTpsMonitor', [ref]$createdNew)
   if (-not $createdNew) {
@@ -1252,6 +1295,8 @@ if (-not $Headless) {
 # ------------------------------------------------------------------ 无头自检
 
 if ($Headless) {
+  # 无头没有界面，但 status.json 要如实报告生效主题（排查用的旁路产物）
+  $script:ThemeName = Resolve-ThemeName
   $deadline = [DateTime]::MaxValue
   if ($Seconds -gt 0) { $deadline = (Get-Date).AddSeconds($Seconds) }
   while ((Get-Date) -lt $deadline) {
@@ -1312,6 +1357,81 @@ function Px {
   return [single]($v * $script:Scale)
 }
 
+# ------------------------------------------------------------------ 主题色板
+# 两套完整的 token（VISUAL.md §8.2）：深色是 0.3.x 的原方案（§3.1），浅色为 0.4.0
+# 新增——同一套语义 token 的"反转"配对，按深色版的对比度校准（正文 ≥ 5:1、
+# 次要 ≥ 2:1、状态色不降级）。RGB 数组存成三元素数组，Build-Theme 统一转 Color。
+$script:ThemeDefs = @{
+  dark = @{
+    back    = @(26, 29, 34)      # surface #1A1D22 窗底
+    ink     = @(242, 244, 247)   # #F2F4F7 主数字、在飞行标题
+    sub     = @(154, 161, 171)   # #9AA1AB 单位/次级标签/空闲主数字
+    faint   = @(92, 100, 112)    # #5C6470 历史柱/次要元信息
+    live    = @(52, 211, 153)    # #34D399 在飞状态点 + 最新柱
+    estim   = @(229, 181, 103)   # #E5B567 估算速率的 ≈
+    error   = @(229, 72, 77)     # #E5484D 错误状态点与错误文案
+    idleDot = @(74, 80, 88)      # #4A5058 空闲状态点
+    rowHi   = @(35, 40, 48)      # #232830 在飞行高亮条（surface 提亮一档）
+    track   = @(38, 43, 50)      # #262B32 柱状图基线
+  }
+  light = @{
+    back    = @(245, 246, 248)   # #F5F6F8 窗底
+    ink     = @(28, 32, 38)      # #1C2026 主数字、在飞行标题
+    sub     = @(91, 100, 112)    # #5B6470 单位/次级标签/空闲主数字
+    faint   = @(154, 161, 171)   # #9AA1AB 历史柱/次要元信息
+    live    = @(5, 150, 105)     # #059669 在飞状态点 + 最新柱
+    estim   = @(161, 98, 7)      # #A16207 估算速率的 ≈
+    error   = @(217, 58, 63)     # #D93A3F 错误状态点与错误文案
+    idleDot = @(176, 182, 191)   # #B0B6BF 空闲状态点
+    rowHi   = @(232, 234, 238)   # #E8EAEE 在飞行高亮条（surface 压暗一档）
+    track   = @(223, 226, 230)   # #DFE2E6 柱状图基线
+  }
+}
+
+function ConvertFrom-RgbArray {
+  param($a)
+  [System.Drawing.Color]::FromArgb($a[0], $a[1], $a[2])
+}
+
+function Build-Theme {
+  # 按主题名重建 Brushes/Pens 与窗底色。换肤时整体替换两张表——Brushes 是 Paint
+  # 的全局依赖，不能只改个别项；旧笔刷先释放，避免反复换肤累积 GDI 句柄。
+  # 调用时机在 $form 创建前后都有可能，窗体不存在时只建表、不碰窗体。
+  param([string]$Name)
+  if ($Name -ne 'light') { $Name = 'dark' }
+  if ($script:ThemeName -eq $Name -and $script:Brushes.Count -gt 0) { return }
+  $t = $script:ThemeDefs[$Name]
+  foreach ($b in @($script:Brushes.Values)) { try { $b.Dispose() } catch { } }
+  foreach ($p in @($script:Pens.Values)) { try { $p.Dispose() } catch { } }
+  $script:Brushes = @{
+    ink     = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.ink)
+    sub     = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.sub)
+    faint   = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.faint)
+    live    = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.live)
+    estim   = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.estim)
+    error   = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.error)
+    idleDot = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.idleDot)
+    rowHi   = New-Object System.Drawing.SolidBrush (ConvertFrom-RgbArray $t.rowHi)
+  }
+  $script:Pens = @{
+    track = New-Object System.Drawing.Pen (ConvertFrom-RgbArray $t.track), 1
+  }
+  $script:ThemeName = $Name
+  if ($form -and -not $form.IsDisposed) {
+    $form.BackColor = ConvertFrom-RgbArray $t.back
+    $form.Invalidate()
+  }
+}
+
+function Update-ThemeAuto {
+  # 跟随系统换肤（仅 auto 模式）：每 5 个 tick（2 秒）读一次注册表。读一次注册表
+  # 的开销可以忽略；显式 dark/light 不探测，节省且语义明确。
+  if ($script:ThemeMode -ne 'auto') { return }
+  Build-Theme (Get-SystemThemeName)
+}
+
+Build-Theme (Resolve-ThemeName)   # 首次构建笔刷表；$form 尚未创建，只建表不碰窗体
+
 $W = [int](Px 216)
 $H = [int](Px 140)
 
@@ -1334,7 +1454,7 @@ $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
 $form.ClientSize = New-Object System.Drawing.Size($W, $H)
 $form.TopMost = $true
 $form.ShowInTaskbar = $false
-$form.BackColor = [System.Drawing.Color]::FromArgb(26, 29, 34)   # surface #1A1D22（VISUAL.md 3.1）
+$form.BackColor = ConvertFrom-RgbArray $script:ThemeDefs[$script:ThemeName].back   # 主题窗底（VISUAL.md 8.2）
 $form.Opacity = $Opacity
 
 $dbProp = $form.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic')
@@ -1414,27 +1534,15 @@ try {
   }
 } catch { }
 
+# 笔刷/画笔由 Build-Theme 按主题构建（VISUAL.md 8.2）。色彩只编码状态的规则
+# 与主题无关：数字只有 ink/sub 两档，彩色仅在表达状态时出现，同一时刻最多一
+# 种彩色在场。
 $script:Fonts = @{
   hero     = New-Object System.Drawing.Font($heroFamily, 30, $heroStyle)
   unit     = New-Object System.Drawing.Font('Segoe UI', 8.5)
   stat     = New-Object System.Drawing.Font('Segoe UI', 8)
   rowTitle = New-Object System.Drawing.Font('Segoe UI', 8.5)          # 多行模式会话标题（VISUAL.md §3.2）
   rowNum   = New-Object System.Drawing.Font($heroFamily, 9)           # 多行模式行内速率（等宽右对齐可扫读）
-}
-# 色彩只编码状态：数字只有白/灰，彩色仅在表达状态时出现，同一时刻最多一种彩
-# 色在场（VISUAL.md 3.1）
-$script:Brushes = @{
-  ink     = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(242, 244, 247))   # 在飞主数字
-  sub     = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(154, 161, 171))   # 单位/元信息/空闲主数字
-  faint   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(92, 100, 112))    # 历史柱/次要元信息
-  live    = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(52, 211, 153))    # 在飞状态点 + 最新柱
-  estim   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(229, 181, 103))   # 估算速率的 ≈（v2 L3，DESIGN.md §6）
-  error   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(229, 72, 77))     # 错误状态点与错误文案
-  idleDot = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(74, 80, 88))      # 空闲状态点
-  rowHi   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(35, 40, 48))       # 多行模式在飞行高亮条（surface 提亮一档）
-}
-$script:Pens = @{
-  track = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(38, 43, 50)), 1
 }
 
 function Save-Pos {
@@ -1906,6 +2014,7 @@ $timer.Add_Tick({
     Update-ZCodeFollow
     if ($form.IsDisposed) { return }   # 本轮跟随把窗口关了
     Update-Sidecar
+    if (($script:TickCount % 5) -eq 0) { Update-ThemeAuto }   # 跟随系统明暗（VISUAL.md §8）
     if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized -or -not $form.Visible) {
       # 收起/隐藏状态：不置顶、不重绘（SetWindowPos 的 SHOWWINDOW 会把窗口顶回来），
       # 但统计照常，保持 status.json 新鲜
